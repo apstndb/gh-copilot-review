@@ -12,7 +12,7 @@ It uses `cobra` for subcommands and flags, and `go-gh` for GitHub CLI integratio
 
 Without `<pr>`, the extension uses the pull request for the current branch.
 
-Default `check` behavior is synchronous polling until Copilot is no longer pending. `check --async` performs a single poll and exits while a review is still requested (for scripting). A separate `--sync` flag is unnecessary because synchronous polling is the default.
+Default `check` behavior is synchronous polling until Copilot is no longer pending. `check --async` performs a single poll and exits while a review is still requested (for scripting). `--interval` and `--timeout` only apply to the default polling behavior and have no effect when `--async` is used. A separate `--sync` flag is unnecessary because synchronous polling is the default.
 
 ## Local development
 

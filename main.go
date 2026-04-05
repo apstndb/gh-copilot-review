@@ -77,7 +77,7 @@ func newRequestCmd() *cobra.Command {
 				return err
 			}
 			if wait {
-				return waitForReview(selector, interval, timeout, false)
+				return checkOrWaitForReview(selector, interval, timeout, false)
 			}
 			return nil
 		},
@@ -105,17 +105,17 @@ func newCheckCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return waitForReview(selector, interval, timeout, async)
+			return checkOrWaitForReview(selector, interval, timeout, async)
 		},
 	}
 
-	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout)")
+	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; ignored with --async")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); ignored with --async")
 	cmd.Flags().BoolVar(&async, "async", false, "single poll and exit while review is still requested (do not wait for completion)")
 	return cmd
 }
 
-func waitForReview(selector string, interval, timeout int, async bool) error {
+func checkOrWaitForReview(selector string, interval, timeout int, async bool) error {
 	if interval < 1 {
 		return fmt.Errorf("interval must be positive: %d", interval)
 	}
