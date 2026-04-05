@@ -8,9 +8,11 @@ It uses `cobra` for subcommands and flags, and `go-gh` for GitHub CLI integratio
 
 - `gh copilot-review request [<pr>]`
 - `gh copilot-review request [<pr>] --wait [--interval 15] [--timeout 0]`
-- `gh copilot-review wait [<pr>] [--interval 15] [--timeout 0] [--once]`
+- `gh copilot-review check [<pr>] [--interval 15] [--timeout 0] [--async]`
 
 Without `<pr>`, the extension uses the pull request for the current branch.
+
+Default `check` behavior is synchronous polling until Copilot is no longer pending. `check --async` performs a single poll and exits while a review is still requested (for scripting). A separate `--sync` flag is unnecessary because synchronous polling is the default.
 
 ## Local development
 
@@ -25,5 +27,7 @@ gh extension install .
 ```sh
 gh copilot-review request 17
 gh copilot-review request 17 --wait --interval 10
-gh copilot-review wait 17 --once
+gh copilot-review check 17
+gh copilot-review check 17 --interval 10
+gh copilot-review check 17 --async
 ```

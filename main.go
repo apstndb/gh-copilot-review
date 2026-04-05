@@ -35,7 +35,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newRequestCmd())
-	cmd.AddCommand(newWaitCmd())
+	cmd.AddCommand(newCheckCmd())
 	return cmd
 }
 
@@ -89,31 +89,33 @@ func newRequestCmd() *cobra.Command {
 	return cmd
 }
 
-func newWaitCmd() *cobra.Command {
+func newCheckCmd() *cobra.Command {
 	var interval int
 	var timeout int
-	var once bool
+	var async bool
 
 	cmd := &cobra.Command{
-		Use:   "wait [<pr>]",
-		Short: "Poll until a pending Copilot review request is no longer pending",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "check [<pr>]",
+		Short: "Check Copilot review status on a pull request",
+		Long: "Poll until the Copilot review is no longer pending (default). " +
+			"With --async, perform a single poll and exit while a review is still requested.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector := ""
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return waitForReview(selector, interval, timeout, once)
+			return waitForReview(selector, interval, timeout, async)
 		},
 	}
 
 	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout)")
-	cmd.Flags().BoolVar(&once, "once", false, "check once and exit without waiting")
+	cmd.Flags().BoolVar(&async, "async", false, "single poll and exit while review is still requested (do not wait for completion)")
 	return cmd
 }
 
-func waitForReview(selector string, interval, timeout int, once bool) error {
+func waitForReview(selector string, interval, timeout int, async bool) error {
 	if interval < 1 {
 		return fmt.Errorf("interval must be positive: %d", interval)
 	}
@@ -147,7 +149,7 @@ func waitForReview(selector string, interval, timeout int, once bool) error {
 
 		if status.CopilotRequested {
 			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
-			if once {
+			if async {
 				return nil
 			}
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
