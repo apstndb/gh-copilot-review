@@ -116,11 +116,13 @@ func newCheckCmd() *cobra.Command {
 }
 
 func checkOrWaitForReview(selector string, interval, timeout int, async bool) error {
-	if interval < 1 {
-		return fmt.Errorf("interval must be positive: %d", interval)
-	}
-	if timeout < 0 {
-		return fmt.Errorf("timeout must be non-negative: %d", timeout)
+	if !async {
+		if interval < 1 {
+			return fmt.Errorf("interval must be positive: %d", interval)
+		}
+		if timeout < 0 {
+			return fmt.Errorf("timeout must be non-negative: %d", timeout)
+		}
 	}
 
 	target, err := resolvePR(selector)
