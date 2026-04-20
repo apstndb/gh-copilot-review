@@ -53,11 +53,10 @@ func newRequestCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			if interval < 1 {
-				return fmt.Errorf("interval must be positive: %d", interval)
-			}
-			if timeout < 0 {
-				return fmt.Errorf("timeout must be non-negative: %d", timeout)
+			if wait {
+				if err := validatePollingFlags(interval, timeout); err != nil {
+					return err
+				}
 			}
 
 			ghArgs := []string{"pr", "edit"}
@@ -101,6 +100,12 @@ func newCheckCmd() *cobra.Command {
 			"With --async, perform a single poll and exit while a review is still requested.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !async {
+				if err := validatePollingFlags(interval, timeout); err != nil {
+					return err
+				}
+			}
+
 			selector := ""
 			if len(args) == 1 {
 				selector = args[0]
@@ -116,15 +121,6 @@ func newCheckCmd() *cobra.Command {
 }
 
 func checkOrWaitForReview(selector string, interval, timeout int, async bool) error {
-	if !async {
-		if interval < 1 {
-			return fmt.Errorf("interval must be positive: %d", interval)
-		}
-		if timeout < 0 {
-			return fmt.Errorf("timeout must be non-negative: %d", timeout)
-		}
-	}
-
 	target, err := resolvePR(selector)
 	if err != nil {
 		return err
@@ -168,6 +164,16 @@ func checkOrWaitForReview(selector string, interval, timeout int, async bool) er
 		}
 		return nil
 	}
+}
+
+func validatePollingFlags(interval, timeout int) error {
+	if interval < 1 {
+		return fmt.Errorf("interval must be positive: %d", interval)
+	}
+	if timeout < 0 {
+		return fmt.Errorf("timeout must be non-negative: %d", timeout)
+	}
+	return nil
 }
 
 type prTarget struct {
