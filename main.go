@@ -100,6 +100,8 @@ func newCheckCmd() *cobra.Command {
 			"With --async, perform a single poll and exit while a review is still requested.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Keep flag validation aligned with the help text: async mode ignores
+			// polling-related flags entirely, including invalid values.
 			if !async {
 				if err := validatePollingFlags(interval, timeout); err != nil {
 					return err
