@@ -76,7 +76,7 @@ func newRequestCmd() *cobra.Command {
 				return err
 			}
 			if wait {
-				return checkOrWaitForReview(selector, interval, timeout, false)
+				return pollReviewStatus(selector, interval, timeout, false)
 			}
 			return nil
 		},
@@ -97,7 +97,7 @@ func newCheckCmd() *cobra.Command {
 		Use:   "check [<pr>]",
 		Short: "Check Copilot review status on a pull request",
 		Long: "Poll until the Copilot review is no longer pending (default). " +
-			"With --async, perform a single poll and exit while a review is still requested.",
+			"With --async, perform a single poll and return a non-zero exit status while a review is still requested.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Keep flag validation aligned with the help text: async mode ignores
@@ -112,17 +112,17 @@ func newCheckCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return checkOrWaitForReview(selector, interval, timeout, async)
+			return pollReviewStatus(selector, interval, timeout, async)
 		},
 	}
 
 	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; ignored with --async")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); ignored with --async")
-	cmd.Flags().BoolVar(&async, "async", false, "single poll and exit while review is still requested (do not wait for completion)")
+	cmd.Flags().BoolVar(&async, "async", false, "perform a single check and exit immediately; returns non-zero while review is still pending")
 	return cmd
 }
 
-func checkOrWaitForReview(selector string, interval, timeout int, async bool) error {
+func pollReviewStatus(selector string, interval, timeout int, async bool) error {
 	target, err := resolvePR(selector)
 	if err != nil {
 		return err
@@ -148,10 +148,10 @@ func checkOrWaitForReview(selector string, interval, timeout int, async bool) er
 		}
 
 		if status.CopilotRequested {
-			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
 			if async {
-				return nil
+				return fmt.Errorf("Copilot review is still pending on %s", target.URL)
 			}
+			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
 				return fmt.Errorf("timed out waiting for Copilot review on %s", target.URL)
 			}
