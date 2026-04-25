@@ -59,7 +59,7 @@ func newRequestCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			if wait {
+			if shouldValidatePollingFlags(cmd, wait) {
 				if err := validatePollingFlags(interval, timeout); err != nil {
 					return err
 				}
@@ -106,9 +106,7 @@ func newCheckCmd() *cobra.Command {
 			"With --async, perform a single poll and return a non-zero exit status while a review is still requested.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Keep flag validation aligned with the help text: async mode ignores
-			// polling-related flags entirely, including invalid values.
-			if !async {
+			if shouldValidatePollingFlags(cmd, !async) {
 				if err := validatePollingFlags(interval, timeout); err != nil {
 					return err
 				}
@@ -122,8 +120,8 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; ignored with --async")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); ignored with --async")
+	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; provided values are still validated with --async")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); provided values are still validated with --async")
 	cmd.Flags().BoolVar(&async, "async", false, "perform a single check and exit immediately; returns non-zero while review is still pending")
 	return cmd
 }
@@ -180,6 +178,10 @@ type pendingReviewError struct {
 
 func (e pendingReviewError) Error() string {
 	return fmt.Sprintf("Copilot review is still pending on %s", e.URL)
+}
+
+func shouldValidatePollingFlags(cmd *cobra.Command, active bool) bool {
+	return active || cmd.Flags().Changed("interval") || cmd.Flags().Changed("timeout")
 }
 
 func validatePollingFlags(interval, timeout int) error {
