@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -21,6 +22,11 @@ const (
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var pendingErr pendingReviewError
+		if errors.As(err, &pendingErr) {
+			fmt.Fprintln(os.Stderr, pendingErr.Error())
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -35,7 +41,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newRequestCmd())
-	cmd.AddCommand(newWaitCmd())
+	cmd.AddCommand(newCheckCmd())
 	return cmd
 }
 
@@ -53,11 +59,10 @@ func newRequestCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			if interval < 1 {
-				return fmt.Errorf("interval must be positive: %d", interval)
-			}
-			if timeout < 0 {
-				return fmt.Errorf("timeout must be non-negative: %d", timeout)
+			if shouldValidatePollingFlags(cmd, wait) {
+				if err := validatePollingFlags(interval, timeout); err != nil {
+					return err
+				}
 			}
 
 			ghArgs := []string{"pr", "edit"}
@@ -77,50 +82,51 @@ func newRequestCmd() *cobra.Command {
 				return err
 			}
 			if wait {
-				return waitForReview(selector, interval, timeout, false)
+				return pollReviewStatus(selector, interval, timeout, false)
 			}
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for Copilot review after requesting it")
-	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when used with --wait")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds when used with --wait (0 disables timeout)")
+	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds with --wait; validated but otherwise ignored without --wait")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds with --wait (0 disables timeout); validated but otherwise ignored without --wait")
 	return cmd
 }
 
-func newWaitCmd() *cobra.Command {
+func newCheckCmd() *cobra.Command {
 	var interval int
 	var timeout int
-	var once bool
+	var async bool
 
 	cmd := &cobra.Command{
-		Use:   "wait [<pr>]",
-		Short: "Poll until a pending Copilot review request is no longer pending",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "check [<pr>]",
+		Short: "Check Copilot review status on a pull request",
+		Long: "Poll until the Copilot review is no longer pending (default). " +
+			"With --async, perform a single poll and return a non-zero exit status while a review is still requested.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if shouldValidatePollingFlags(cmd, !async) {
+				if err := validatePollingFlags(interval, timeout); err != nil {
+					return err
+				}
+			}
+
 			selector := ""
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return waitForReview(selector, interval, timeout, once)
+			return pollReviewStatus(selector, interval, timeout, async)
 		},
 	}
 
-	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout)")
-	cmd.Flags().BoolVar(&once, "once", false, "check once and exit without waiting")
+	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; provided values are still validated with --async")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); provided values are still validated with --async")
+	cmd.Flags().BoolVar(&async, "async", false, "perform a single check and exit immediately; returns non-zero while review is still pending")
 	return cmd
 }
 
-func waitForReview(selector string, interval, timeout int, once bool) error {
-	if interval < 1 {
-		return fmt.Errorf("interval must be positive: %d", interval)
-	}
-	if timeout < 0 {
-		return fmt.Errorf("timeout must be non-negative: %d", timeout)
-	}
-
+func pollReviewStatus(selector string, interval, timeout int, async bool) error {
 	target, err := resolvePR(selector)
 	if err != nil {
 		return err
@@ -146,10 +152,10 @@ func waitForReview(selector string, interval, timeout int, once bool) error {
 		}
 
 		if status.CopilotRequested {
-			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
-			if once {
-				return nil
+			if async {
+				return pendingReviewError{URL: target.URL}
 			}
+			fmt.Fprintf(os.Stderr, "%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
 				return fmt.Errorf("timed out waiting for Copilot review on %s", target.URL)
 			}
@@ -164,6 +170,28 @@ func waitForReview(selector string, interval, timeout int, once bool) error {
 		}
 		return nil
 	}
+}
+
+type pendingReviewError struct {
+	URL string
+}
+
+func (e pendingReviewError) Error() string {
+	return fmt.Sprintf("Copilot review is still pending on %s", e.URL)
+}
+
+func shouldValidatePollingFlags(cmd *cobra.Command, active bool) bool {
+	return active || cmd.Flags().Changed("interval") || cmd.Flags().Changed("timeout")
+}
+
+func validatePollingFlags(interval, timeout int) error {
+	if interval < 1 {
+		return fmt.Errorf("interval must be positive: %d", interval)
+	}
+	if timeout < 0 {
+		return fmt.Errorf("timeout must be non-negative: %d", timeout)
+	}
+	return nil
 }
 
 type prTarget struct {
