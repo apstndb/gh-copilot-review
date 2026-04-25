@@ -157,7 +157,7 @@ func pollReviewStatus(selector string, interval, timeout int, async bool) error 
 			if async {
 				return pendingReviewError{URL: target.URL}
 			}
-			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
+			fmt.Fprintf(os.Stderr, "%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
 				return fmt.Errorf("timed out waiting for Copilot review on %s", target.URL)
 			}
