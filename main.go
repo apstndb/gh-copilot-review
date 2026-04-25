@@ -89,8 +89,8 @@ func newRequestCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for Copilot review after requesting it")
-	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when used with --wait")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds when used with --wait (0 disables timeout)")
+	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds with --wait; validated but otherwise ignored without --wait")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds with --wait (0 disables timeout); validated but otherwise ignored without --wait")
 	return cmd
 }
 
