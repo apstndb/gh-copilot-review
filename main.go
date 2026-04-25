@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -21,6 +22,11 @@ const (
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var pendingErr pendingReviewError
+		if errors.As(err, &pendingErr) {
+			fmt.Fprintln(os.Stderr, pendingErr.Error())
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -149,7 +155,7 @@ func pollReviewStatus(selector string, interval, timeout int, async bool) error 
 
 		if status.CopilotRequested {
 			if async {
-				return fmt.Errorf("Copilot review is still pending on %s", target.URL)
+				return pendingReviewError{URL: target.URL}
 			}
 			fmt.Printf("%s awaiting review from Copilot on %s\n", time.Now().Format("2006-01-02 15:04:05"), target.URL)
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
@@ -166,6 +172,14 @@ func pollReviewStatus(selector string, interval, timeout int, async bool) error 
 		}
 		return nil
 	}
+}
+
+type pendingReviewError struct {
+	URL string
+}
+
+func (e pendingReviewError) Error() string {
+	return fmt.Sprintf("Copilot review is still pending on %s", e.URL)
 }
 
 func validatePollingFlags(interval, timeout int) error {
