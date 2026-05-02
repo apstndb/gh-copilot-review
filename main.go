@@ -841,11 +841,7 @@ func lastPagePath(linkHeaders []string) (string, bool, error) {
 				return "", false, fmt.Errorf("parse Link target: %w", err)
 			}
 
-			path := strings.TrimPrefix(target.EscapedPath(), "/")
-			if target.RawQuery != "" {
-				path += "?" + target.RawQuery
-			}
-			return path, true, nil
+			return strings.TrimPrefix(target.RequestURI(), "/"), true, nil
 		}
 	}
 	return "", false, nil
@@ -879,11 +875,7 @@ func setPage(path string, page int) (string, error) {
 	query.Set("page", strconv.Itoa(page))
 	target.RawQuery = query.Encode()
 
-	updatedPath := strings.TrimPrefix(target.EscapedPath(), "/")
-	if target.RawQuery != "" {
-		updatedPath += "?" + target.RawQuery
-	}
-	return updatedPath, nil
+	return strings.TrimPrefix(target.RequestURI(), "/"), nil
 }
 
 type rateLimitSnapshot struct {
