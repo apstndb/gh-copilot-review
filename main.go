@@ -86,7 +86,7 @@ func newRequestCmd() *cobra.Command {
 
 			polling := newPollingConfig(backend, restWeight, graphqlWeight, autoAdjustWeights)
 			if shouldValidateBackendFlags(cmd, wait) {
-				if err := validatePollingConfig(polling); err != nil {
+				if err := validatePollingConfigForCommand(cmd, polling); err != nil {
 					return err
 				}
 			}
@@ -147,7 +147,7 @@ func newCheckCmd() *cobra.Command {
 			}
 
 			polling := newPollingConfig(backend, restWeight, graphqlWeight, autoAdjustWeights)
-			if err := validatePollingConfig(polling); err != nil {
+			if err := validatePollingConfigForCommand(cmd, polling); err != nil {
 				return err
 			}
 
@@ -301,6 +301,19 @@ func validatePollingConfig(config pollingConfig) error {
 	if (config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom) &&
 		config.RESTWeight == 0 && config.GraphQLWeight == 0 {
 		return errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
+	}
+	return nil
+}
+
+func validatePollingConfigForCommand(cmd *cobra.Command, config pollingConfig) error {
+	if err := validatePollingConfig(config); err != nil {
+		return err
+	}
+	if config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom {
+		return nil
+	}
+	if cmd.Flags().Changed("rest-weight") || cmd.Flags().Changed("graphql-weight") || cmd.Flags().Changed("auto-adjust-weights") {
+		return errors.New("rest-weight, graphql-weight, and auto-adjust-weights require --backend auto or random")
 	}
 	return nil
 }

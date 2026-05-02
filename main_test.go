@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/spf13/cobra"
 )
 
 func TestValidatePollingConfig(t *testing.T) {
@@ -73,6 +74,31 @@ func TestValidatePollingConfig(t *testing.T) {
 				t.Fatalf("validatePollingConfig() error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidatePollingConfigForCommand(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("backend", string(pollingBackendAuto), "")
+	cmd.Flags().Int("rest-weight", 1, "")
+	cmd.Flags().Int("graphql-weight", 1, "")
+	cmd.Flags().Bool("auto-adjust-weights", false, "")
+	if err := cmd.Flags().Set("backend", string(pollingBackendREST)); err != nil {
+		t.Fatalf("Set backend: %v", err)
+	}
+	if err := cmd.Flags().Set("rest-weight", "2"); err != nil {
+		t.Fatalf("Set rest-weight: %v", err)
+	}
+
+	err := validatePollingConfigForCommand(cmd, pollingConfig{
+		Backend:       pollingBackendREST,
+		RESTWeight:    2,
+		GraphQLWeight: 1,
+	})
+	if err == nil || !containsAny(err.Error(), "require --backend auto or random") {
+		t.Fatalf("validatePollingConfigForCommand() error = %v, want adaptive-backend validation", err)
 	}
 }
 
