@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -394,8 +397,8 @@ type rateLimitFetcher interface {
 	Fetch() (rateLimitSnapshot, error)
 }
 
-type restGetter interface {
-	Get(path string, resp interface{}) error
+type restRequester interface {
+	Request(method string, path string, body io.Reader) (*http.Response, error)
 }
 
 type restRateLimitFetcher struct {
@@ -433,6 +436,22 @@ func (f *cachedRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
 	f.cachedAt = now()
 	f.hasCached = true
 	return snapshot, nil
+}
+
+func getRESTJSON(client restRequester, path string, response interface{}) (http.Header, error) {
+	resp, err := client.Request("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, api.HandleHTTPError(resp)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
+		return nil, fmt.Errorf("decode REST response for %s: %w", path, err)
+	}
+	return resp.Header.Clone(), nil
 }
 
 func fetchReviewStatusWithFallback(order []pollingBackend, fetchers map[pollingBackend]reviewStatusFetcher, owner, repo string, number int) (reviewStatus, error) {
@@ -654,7 +673,7 @@ type pullRequestReview struct {
 
 func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number int) (reviewStatus, error) {
 	var requestedReviewers requestedReviewersResponse
-	if err := client.Get(fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number), &requestedReviewers); err != nil {
+	if _, err := getRESTJSON(client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number), &requestedReviewers); err != nil {
 		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
 	}
 
@@ -666,19 +685,27 @@ func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number in
 	return buildReviewStatusFromREST(requestedReviewers, reviews), nil
 }
 
-func fetchPullRequestReviewsREST(client restGetter, owner, repo string, number int) ([]pullRequestReview, error) {
+func fetchPullRequestReviewsREST(client restRequester, owner, repo string, number int) ([]pullRequestReview, error) {
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d", owner, repo, number, pullRequestReviewsPerPage)
 	var reviews []pullRequestReview
-	for page := 1; ; page++ {
-		var currentPage []pullRequestReview
-		path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", owner, repo, number, pullRequestReviewsPerPage, page)
-		if err := client.Get(path, &currentPage); err != nil {
-			return nil, fmt.Errorf("query pull request reviews: %w", err)
-		}
-		reviews = append(reviews, currentPage...)
-		if len(currentPage) < pullRequestReviewsPerPage {
-			return reviews, nil
-		}
+	headers, err := getRESTJSON(client, path, &reviews)
+	if err != nil {
+		return nil, fmt.Errorf("query pull request reviews: %w", err)
 	}
+
+	lastPath, ok, err := lastPagePath(headers.Values("Link"))
+	if err != nil {
+		return nil, err
+	}
+	if !ok || lastPath == path {
+		return reviews, nil
+	}
+
+	var latestPage []pullRequestReview
+	if _, err := getRESTJSON(client, lastPath, &latestPage); err != nil {
+		return nil, fmt.Errorf("query last pull request review page: %w", err)
+	}
+	return latestPage, nil
 }
 
 func buildReviewStatusFromREST(requestedReviewers requestedReviewersResponse, reviews []pullRequestReview) reviewStatus {
@@ -690,23 +717,50 @@ func buildReviewStatusFromREST(requestedReviewers requestedReviewersResponse, re
 		}
 	}
 
-	var copilotReviews []latestReview
+	var latest *latestReview
 	for _, review := range reviews {
 		if strings.Contains(strings.ToLower(review.User.Login), copilotReviewLogin) {
-			copilotReviews = append(copilotReviews, latestReview{
+			candidate := latestReview{
 				State:       review.State,
 				SubmittedAt: review.SubmittedAt,
-			})
+			}
+			if latest == nil || latest.SubmittedAt.Before(candidate.SubmittedAt) {
+				latest = &candidate
+			}
 		}
 	}
-	sort.Slice(copilotReviews, func(i, j int) bool {
-		return copilotReviews[i].SubmittedAt.Before(copilotReviews[j].SubmittedAt)
-	})
-	if len(copilotReviews) > 0 {
-		status.LatestCopilotReview = &copilotReviews[len(copilotReviews)-1]
-	}
+	status.LatestCopilotReview = latest
 
 	return status
+}
+
+func lastPagePath(linkHeaders []string) (string, bool, error) {
+	for _, linkHeader := range linkHeaders {
+		for _, part := range strings.Split(linkHeader, ",") {
+			part = strings.TrimSpace(part)
+			if !strings.Contains(part, `rel="last"`) {
+				continue
+			}
+
+			start := strings.Index(part, "<")
+			end := strings.Index(part, ">")
+			if start == -1 || end == -1 || end <= start+1 {
+				return "", false, fmt.Errorf("parse Link header: %q", linkHeader)
+			}
+
+			target, err := url.Parse(part[start+1 : end])
+			if err != nil {
+				return "", false, fmt.Errorf("parse Link target: %w", err)
+			}
+
+			path := strings.TrimPrefix(target.EscapedPath(), "/")
+			if target.RawQuery != "" {
+				path += "?" + target.RawQuery
+			}
+			return path, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 type rateLimitSnapshot struct {
@@ -725,9 +779,9 @@ type rateLimitResponse struct {
 	} `json:"resources"`
 }
 
-func fetchRateLimitSnapshot(client restGetter) (rateLimitSnapshot, error) {
+func fetchRateLimitSnapshot(client restRequester) (rateLimitSnapshot, error) {
 	var resp rateLimitResponse
-	if err := client.Get("rate_limit", &resp); err != nil {
+	if _, err := getRESTJSON(client, "rate_limit", &resp); err != nil {
 		return rateLimitSnapshot{}, fmt.Errorf("query rate limits: %w", err)
 	}
 	return rateLimitSnapshot{

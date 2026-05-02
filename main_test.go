@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -202,14 +206,6 @@ func TestBuildReviewStatusFromREST(t *testing.T) {
 func TestFetchPullRequestReviewsREST(t *testing.T) {
 	t.Parallel()
 
-	pageOne := make([]pullRequestReview, pullRequestReviewsPerPage)
-	for index := range pageOne {
-		pageOne[index] = pullRequestReview{
-			User:        pullRequestReviewUser{Login: "reviewer"},
-			State:       "COMMENTED",
-			SubmittedAt: time.Unix(int64(index), 0),
-		}
-	}
 	pageTwo := []pullRequestReview{
 		{
 			User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
@@ -219,9 +215,24 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 	}
 
 	client := &stubRESTGetter{
-		reviewPages: map[string][]pullRequestReview{
-			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=1": pageOne,
-			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2": pageTwo,
+		responses: map[string]stubRESTResponse{
+			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100": {
+				body: []pullRequestReview{
+					{
+						User:        pullRequestReviewUser{Login: "reviewer"},
+						State:       "COMMENTED",
+						SubmittedAt: time.Unix(1, 0),
+					},
+				},
+				headers: http.Header{
+					"Link": []string{
+						`<https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2>; rel="next", <https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2>; rel="last"`,
+					},
+				},
+			},
+			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2": {
+				body: pageTwo,
+			},
 		},
 	}
 
@@ -229,8 +240,11 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
-	if len(reviews) != len(pageOne)+len(pageTwo) {
-		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want %d", len(reviews), len(pageOne)+len(pageTwo))
+	if len(reviews) != len(pageTwo) {
+		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want %d", len(reviews), len(pageTwo))
+	}
+	if reviews[0].State != "APPROVED" {
+		t.Fatalf("fetchPullRequestReviewsREST() state = %q, want APPROVED", reviews[0].State)
 	}
 }
 
@@ -371,21 +385,34 @@ func (f *stubReviewStatusFetcher) Fetch(string, string, int) (reviewStatus, erro
 	return f.status, nil
 }
 
-type stubRESTGetter struct {
-	reviewPages map[string][]pullRequestReview
+type stubRESTResponse struct {
+	body    interface{}
+	headers http.Header
+	status  int
 }
 
-func (g *stubRESTGetter) Get(path string, resp interface{}) error {
-	reviews, ok := g.reviewPages[path]
+type stubRESTGetter struct {
+	responses map[string]stubRESTResponse
+}
+
+func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Response, error) {
+	response, ok := g.responses[path]
 	if !ok {
-		reviews = []pullRequestReview{}
+		response = stubRESTResponse{body: []pullRequestReview{}}
 	}
-	target, ok := resp.(*[]pullRequestReview)
-	if !ok {
-		return errors.New("unexpected response type")
+	payload, err := json.Marshal(response.body)
+	if err != nil {
+		return nil, err
 	}
-	*target = append((*target)[:0], reviews...)
-	return nil
+	status := response.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     response.headers.Clone(),
+		Body:       io.NopCloser(bytes.NewReader(payload)),
+	}, nil
 }
 
 type stubRateLimitFetcher struct {
