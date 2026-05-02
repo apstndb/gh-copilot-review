@@ -530,6 +530,39 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	}
 }
 
+func TestLastPagePath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handles whitespace quoted commas and multi-token rel", func(t *testing.T) {
+		t.Parallel()
+
+		path, ok, err := lastPagePath([]string{
+			` <https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2>; rel="next", <https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=3> ; title="latest, page" ; rel="prev last" `,
+		})
+		if err != nil {
+			t.Fatalf("lastPagePath() error = %v", err)
+		}
+		if !ok {
+			t.Fatal("lastPagePath() ok = false, want true")
+		}
+		want := "repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=3"
+		if path != want {
+			t.Fatalf("lastPagePath() = %q, want %q", path, want)
+		}
+	})
+
+	t.Run("rejects malformed header", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := lastPagePath([]string{
+			`<https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=3; rel="last"`,
+		})
+		if err == nil {
+			t.Fatal("lastPagePath() error = nil, want parse failure")
+		}
+	})
+}
+
 type stubReviewStatusFetcher struct {
 	status reviewStatus
 	err    error

@@ -851,19 +851,20 @@ func containsCopilotReview(reviews []pullRequestReview) bool {
 
 func lastPagePath(linkHeaders []string) (string, bool, error) {
 	for _, linkHeader := range linkHeaders {
-		for _, part := range strings.Split(linkHeader, ",") {
-			part = strings.TrimSpace(part)
-			if !strings.Contains(part, `rel="last"`) {
+		parts, err := splitHeaderValues(linkHeader, ',')
+		if err != nil {
+			return "", false, fmt.Errorf("parse Link header: %w", err)
+		}
+		for _, part := range parts {
+			targetValue, relValue, err := parseLinkHeaderPart(part)
+			if err != nil {
+				return "", false, fmt.Errorf("parse Link header: %w", err)
+			}
+			if !containsLinkRelation(relValue, "last") {
 				continue
 			}
 
-			start := strings.Index(part, "<")
-			end := strings.Index(part, ">")
-			if start == -1 || end == -1 || end <= start+1 {
-				return "", false, fmt.Errorf("parse Link header: %q", linkHeader)
-			}
-
-			target, err := url.Parse(part[start+1 : end])
+			target, err := url.Parse(targetValue)
 			if err != nil {
 				return "", false, fmt.Errorf("parse Link target: %w", err)
 			}
@@ -872,6 +873,88 @@ func lastPagePath(linkHeaders []string) (string, bool, error) {
 		}
 	}
 	return "", false, nil
+}
+
+func parseLinkHeaderPart(part string) (targetValue string, relValue string, err error) {
+	part = strings.TrimSpace(part)
+	if part == "" {
+		return "", "", nil
+	}
+	if !strings.HasPrefix(part, "<") {
+		return "", "", fmt.Errorf("missing link target: %q", part)
+	}
+	end := strings.Index(part, ">")
+	if end <= 1 {
+		return "", "", fmt.Errorf("missing link target end: %q", part)
+	}
+
+	targetValue = part[1:end]
+	params := strings.TrimSpace(part[end+1:])
+	if params == "" {
+		return targetValue, "", nil
+	}
+	params = strings.TrimSpace(strings.TrimPrefix(params, ";"))
+	if params == "" {
+		return targetValue, "", nil
+	}
+
+	paramParts, err := splitHeaderValues(params, ';')
+	if err != nil {
+		return "", "", err
+	}
+	for _, paramPart := range paramParts {
+		key, value, ok := strings.Cut(strings.TrimSpace(paramPart), "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "rel") {
+			return targetValue, strings.Trim(strings.TrimSpace(value), `"`), nil
+		}
+	}
+	return targetValue, "", nil
+}
+
+func splitHeaderValues(value string, separator rune) ([]string, error) {
+	var (
+		values   []string
+		current  strings.Builder
+		inQuotes bool
+		inTarget bool
+	)
+	for _, r := range value {
+		switch r {
+		case '"':
+			inQuotes = !inQuotes
+		case '<':
+			if !inQuotes {
+				inTarget = true
+			}
+		case '>':
+			if !inQuotes {
+				inTarget = false
+			}
+		}
+		if r == separator && !inQuotes && !inTarget {
+			values = append(values, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if inQuotes || inTarget {
+		return nil, fmt.Errorf("unterminated header value: %q", value)
+	}
+	values = append(values, current.String())
+	return values, nil
+}
+
+func containsLinkRelation(relValue string, target string) bool {
+	for _, relation := range strings.Fields(relValue) {
+		if relation == target {
+			return true
+		}
+	}
+	return false
 }
 
 func pageNumber(path string) (int, error) {
