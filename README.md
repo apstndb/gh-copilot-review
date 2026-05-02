@@ -16,7 +16,7 @@ Default `check` behavior is synchronous polling until Copilot is no longer pendi
 
 Polling uses `--backend auto` by default:
 
-- `auto` prefers REST for equivalent status checks and falls back to GraphQL for retryable or rate-limit errors
+- `auto` prefers REST for equivalent status checks and falls back between REST and GraphQL based on the selected primary backend
 - `random` spreads load across REST and GraphQL with configurable weights
 - `rest` and `graphql` pin polling to a single backend
 

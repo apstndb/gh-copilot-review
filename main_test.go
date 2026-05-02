@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -244,6 +245,8 @@ func TestBuildReviewStatusFromREST(t *testing.T) {
 func TestFetchPullRequestReviewsREST(t *testing.T) {
 	t.Parallel()
 
+	firstPagePath := fmt.Sprintf("repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=%d", pullRequestReviewsPerPage)
+	secondPagePath := fmt.Sprintf("repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=%d&page=2", pullRequestReviewsPerPage)
 	pageTwo := []pullRequestReview{
 		{
 			User:        pullRequestReviewUser{Login: "reviewer"},
@@ -254,7 +257,7 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 
 	client := &stubRESTGetter{
 		responses: map[string]stubRESTResponse{
-			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100": {
+			firstPagePath: {
 				body: []pullRequestReview{
 					{
 						User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
@@ -264,11 +267,11 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 				},
 				headers: http.Header{
 					"Link": []string{
-						`<https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2>; rel="next", <https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2>; rel="last"`,
+						fmt.Sprintf("<https://api.github.com/%s>; rel=\"next\", <https://api.github.com/%s>; rel=\"last\"", secondPagePath, secondPagePath),
 					},
 				},
 			},
-			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2": {
+			secondPagePath: {
 				body: pageTwo,
 			},
 		},
