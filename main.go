@@ -750,7 +750,7 @@ func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number in
 
 func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string, number int) (reviewStatus, error) {
 	var requestedReviewers requestedReviewersResponse
-	if _, err := getRESTJSON(client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number), &requestedReviewers); err != nil {
+	if _, err := getRESTJSON(client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", url.PathEscape(owner), url.PathEscape(repo), number), &requestedReviewers); err != nil {
 		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
 	}
 	status := buildReviewStatusFromREST(requestedReviewers, nil)
@@ -768,6 +768,9 @@ func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string
 }
 
 func fetchPullRequestReviewsREST(client restRequester, owner, repo string, number int) ([]pullRequestReview, error) {
+	owner = url.PathEscape(owner)
+	repo = url.PathEscape(repo)
+
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d", owner, repo, number, pullRequestReviewsPerPage)
 	var firstPageReviews []pullRequestReview
 	headers, err := getRESTJSON(client, path, &firstPageReviews)
@@ -796,6 +799,8 @@ func fetchPullRequestReviewsREST(client restRequester, owner, repo string, numbe
 		return nil, err
 	}
 	for page := lastPageNumber - 1; page >= 2; page-- {
+		// Keep scanning until page 2 so we do not miss the newest Copilot review if later non-Copilot
+		// reviews pushed it off the last page.
 		currentPath, err := setPage(lastPath, page)
 		if err != nil {
 			return nil, err

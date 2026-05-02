@@ -433,6 +433,35 @@ func TestFetchPullRequestReviewsRESTPreservesEnterprisePaginationURL(t *testing.
 	}
 }
 
+func TestFetchPullRequestReviewsRESTEscapesOwnerAndRepo(t *testing.T) {
+	t.Parallel()
+
+	client := &stubRESTGetter{
+		responses: map[string]stubRESTResponse{
+			"repos/octo%20corp/repo%20name/pulls/3/reviews?per_page=100": {
+				body: []pullRequestReview{
+					{
+						User:        pullRequestReviewUser{Login: "reviewer"},
+						State:       "COMMENTED",
+						SubmittedAt: time.Unix(1, 0),
+					},
+				},
+			},
+		},
+	}
+
+	reviews, err := fetchPullRequestReviewsREST(client, "octo corp", "repo name", 3)
+	if err != nil {
+		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want 1", len(reviews))
+	}
+	if client.requestCount("repos/octo%20corp/repo%20name/pulls/3/reviews?per_page=100") != 1 {
+		t.Fatal("fetchPullRequestReviewsREST() did not escape reviews path")
+	}
+}
+
 func TestFetchReviewStatusRESTSkipsReviewsWhilePending(t *testing.T) {
 	t.Parallel()
 
@@ -458,6 +487,31 @@ func TestFetchReviewStatusRESTSkipsReviewsWhilePending(t *testing.T) {
 	}
 	if client.totalRequests() != 1 {
 		t.Fatalf("fetchReviewStatusREST() total requests = %d, want 1", client.totalRequests())
+	}
+}
+
+func TestFetchReviewStatusRESTEscapesOwnerAndRepo(t *testing.T) {
+	t.Parallel()
+
+	client := &stubRESTGetter{
+		responses: map[string]stubRESTResponse{
+			"repos/octo%20corp/repo%20name/pulls/3/requested_reviewers": {
+				body: requestedReviewersResponse{},
+			},
+			"repos/octo%20corp/repo%20name/pulls/3/reviews?per_page=100": {
+				body: []pullRequestReview{},
+			},
+		},
+	}
+
+	if _, err := fetchReviewStatusRESTWithRequester(client, "octo corp", "repo name", 3); err != nil {
+		t.Fatalf("fetchReviewStatusRESTWithRequester() error = %v", err)
+	}
+	if client.requestCount("repos/octo%20corp/repo%20name/pulls/3/requested_reviewers") != 1 {
+		t.Fatal("fetchReviewStatusRESTWithRequester() did not escape requested_reviewers path")
+	}
+	if client.requestCount("repos/octo%20corp/repo%20name/pulls/3/reviews?per_page=100") != 1 {
+		t.Fatal("fetchReviewStatusRESTWithRequester() did not escape reviews path")
 	}
 }
 
