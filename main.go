@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	copilotRequestLogin = "copilot"
-	copilotReviewLogin  = "copilot-pull-request-reviewer"
+	copilotRequestLogin       = "copilot"
+	copilotReviewLogin        = "copilot-pull-request-reviewer"
+	pullRequestReviewsPerPage = 100
 )
 
 type pollingBackend string
@@ -207,7 +208,11 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 		}
 		fetchers[pollingBackendREST] = restReviewStatusFetcher{client: client}
 		if polling.AutoAdjustWeights && (polling.Backend == pollingBackendAuto || polling.Backend == pollingBackendRandom) {
-			rateLimits = restRateLimitFetcher{client: client}
+			rateLimits = &cachedRateLimitFetcher{
+				fetcher:    restRateLimitFetcher{client: client},
+				minRefresh: time.Minute,
+				now:        time.Now,
+			}
 		}
 	}
 
@@ -319,9 +324,6 @@ func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, rand
 }
 
 func preferredAutoBackend(config pollingConfig, limits *rateLimitSnapshot) pollingBackend {
-	if !config.AutoAdjustWeights || limits == nil {
-		return pollingBackendREST
-	}
 	restWeight, graphqlWeight := effectivePollingWeights(config, limits)
 	if graphqlWeight > restWeight {
 		return pollingBackendGraphQL
@@ -392,12 +394,45 @@ type rateLimitFetcher interface {
 	Fetch() (rateLimitSnapshot, error)
 }
 
+type restGetter interface {
+	Get(path string, resp interface{}) error
+}
+
 type restRateLimitFetcher struct {
 	client *api.RESTClient
 }
 
 func (f restRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
 	return fetchRateLimitSnapshot(f.client)
+}
+
+type cachedRateLimitFetcher struct {
+	fetcher    rateLimitFetcher
+	minRefresh time.Duration
+	now        func() time.Time
+
+	cached    rateLimitSnapshot
+	cachedAt  time.Time
+	hasCached bool
+}
+
+func (f *cachedRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
+	now := time.Now
+	if f.now != nil {
+		now = f.now
+	}
+	if f.hasCached && now().Sub(f.cachedAt) < f.minRefresh {
+		return f.cached, nil
+	}
+
+	snapshot, err := f.fetcher.Fetch()
+	if err != nil {
+		return rateLimitSnapshot{}, err
+	}
+	f.cached = snapshot
+	f.cachedAt = now()
+	f.hasCached = true
+	return snapshot, nil
 }
 
 func fetchReviewStatusWithFallback(order []pollingBackend, fetchers map[pollingBackend]reviewStatusFetcher, owner, repo string, number int) (reviewStatus, error) {
@@ -623,12 +658,27 @@ func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number in
 		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
 	}
 
-	var reviews []pullRequestReview
-	if err := client.Get(fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number), &reviews); err != nil {
-		return reviewStatus{}, fmt.Errorf("query pull request reviews: %w", err)
+	reviews, err := fetchPullRequestReviewsREST(client, owner, repo, number)
+	if err != nil {
+		return reviewStatus{}, err
 	}
 
 	return buildReviewStatusFromREST(requestedReviewers, reviews), nil
+}
+
+func fetchPullRequestReviewsREST(client restGetter, owner, repo string, number int) ([]pullRequestReview, error) {
+	var reviews []pullRequestReview
+	for page := 1; ; page++ {
+		var currentPage []pullRequestReview
+		path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", owner, repo, number, pullRequestReviewsPerPage, page)
+		if err := client.Get(path, &currentPage); err != nil {
+			return nil, fmt.Errorf("query pull request reviews: %w", err)
+		}
+		reviews = append(reviews, currentPage...)
+		if len(currentPage) < pullRequestReviewsPerPage {
+			return reviews, nil
+		}
+	}
 }
 
 func buildReviewStatusFromREST(requestedReviewers requestedReviewersResponse, reviews []pullRequestReview) reviewStatus {
@@ -675,7 +725,7 @@ type rateLimitResponse struct {
 	} `json:"resources"`
 }
 
-func fetchRateLimitSnapshot(client *api.RESTClient) (rateLimitSnapshot, error) {
+func fetchRateLimitSnapshot(client restGetter) (rateLimitSnapshot, error) {
 	var resp rateLimitResponse
 	if err := client.Get("rate_limit", &resp); err != nil {
 		return rateLimitSnapshot{}, fmt.Errorf("query rate limits: %w", err)

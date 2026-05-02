@@ -103,6 +103,16 @@ func TestSelectPollingBackends(t *testing.T) {
 			want:      []pollingBackend{pollingBackendREST, pollingBackendGraphQL},
 		},
 		{
+			name: "auto honors configured weights",
+			config: pollingConfig{
+				Backend:       pollingBackendAuto,
+				RESTWeight:    1,
+				GraphQLWeight: 2,
+			},
+			randomInt: func(int) int { return 0 },
+			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
+		},
+		{
 			name: "auto can prefer graphql when adjusted weight is higher",
 			config: pollingConfig{
 				Backend:           pollingBackendAuto,
@@ -189,6 +199,41 @@ func TestBuildReviewStatusFromREST(t *testing.T) {
 	}
 }
 
+func TestFetchPullRequestReviewsREST(t *testing.T) {
+	t.Parallel()
+
+	pageOne := make([]pullRequestReview, pullRequestReviewsPerPage)
+	for index := range pageOne {
+		pageOne[index] = pullRequestReview{
+			User:        pullRequestReviewUser{Login: "reviewer"},
+			State:       "COMMENTED",
+			SubmittedAt: time.Unix(int64(index), 0),
+		}
+	}
+	pageTwo := []pullRequestReview{
+		{
+			User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
+			State:       "APPROVED",
+			SubmittedAt: time.Unix(999, 0),
+		},
+	}
+
+	client := &stubRESTGetter{
+		reviewPages: map[string][]pullRequestReview{
+			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=1": pageOne,
+			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=2": pageTwo,
+		},
+	}
+
+	reviews, err := fetchPullRequestReviewsREST(client, "apstndb", "gh-copilot-review", 3)
+	if err != nil {
+		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
+	}
+	if len(reviews) != len(pageOne)+len(pageTwo) {
+		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want %d", len(reviews), len(pageOne)+len(pageTwo))
+	}
+}
+
 func TestFetchReviewStatusWithFallback(t *testing.T) {
 	t.Parallel()
 
@@ -266,6 +311,52 @@ func TestIsFallbackEligibleError(t *testing.T) {
 	}
 }
 
+func TestCachedRateLimitFetcher(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
+	source := &stubRateLimitFetcher{
+		snapshots: []rateLimitSnapshot{
+			{CoreRemaining: 10, GraphQLRemaining: 20},
+			{CoreRemaining: 5, GraphQLRemaining: 15},
+		},
+	}
+	cache := &cachedRateLimitFetcher{
+		fetcher:    source,
+		minRefresh: time.Minute,
+		now: func() time.Time {
+			return now
+		},
+	}
+
+	first, err := cache.Fetch()
+	if err != nil {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() error = %v", err)
+	}
+	second, err := cache.Fetch()
+	if err != nil {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() second error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() second = %#v, want %#v", second, first)
+	}
+	if source.calls != 1 {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 1", source.calls)
+	}
+
+	now = now.Add(2 * time.Minute)
+	third, err := cache.Fetch()
+	if err != nil {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() third error = %v", err)
+	}
+	if third.CoreRemaining != 5 || third.GraphQLRemaining != 15 {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() third = %#v, want refreshed snapshot", third)
+	}
+	if source.calls != 2 {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 2", source.calls)
+	}
+}
+
 type stubReviewStatusFetcher struct {
 	status reviewStatus
 	err    error
@@ -278,4 +369,35 @@ func (f *stubReviewStatusFetcher) Fetch(string, string, int) (reviewStatus, erro
 		return reviewStatus{}, f.err
 	}
 	return f.status, nil
+}
+
+type stubRESTGetter struct {
+	reviewPages map[string][]pullRequestReview
+}
+
+func (g *stubRESTGetter) Get(path string, resp interface{}) error {
+	reviews, ok := g.reviewPages[path]
+	if !ok {
+		reviews = []pullRequestReview{}
+	}
+	target, ok := resp.(*[]pullRequestReview)
+	if !ok {
+		return errors.New("unexpected response type")
+	}
+	*target = append((*target)[:0], reviews...)
+	return nil
+}
+
+type stubRateLimitFetcher struct {
+	snapshots []rateLimitSnapshot
+	calls     int
+}
+
+func (f *stubRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
+	if f.calls >= len(f.snapshots) {
+		return rateLimitSnapshot{}, errors.New("no snapshot")
+	}
+	snapshot := f.snapshots[f.calls]
+	f.calls++
+	return snapshot, nil
 }
