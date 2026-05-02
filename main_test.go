@@ -262,6 +262,13 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 
 	firstPagePath := fmt.Sprintf("repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=%d", pullRequestReviewsPerPage)
 	secondPagePath := fmt.Sprintf("repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=%d&page=2", pullRequestReviewsPerPage)
+	firstPageReviews := []pullRequestReview{
+		{
+			User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
+			State:       "APPROVED",
+			SubmittedAt: time.Unix(1, 0),
+		},
+	}
 	pageTwo := []pullRequestReview{
 		{
 			User:        pullRequestReviewUser{Login: "reviewer"},
@@ -273,13 +280,7 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 	client := &stubRESTGetter{
 		responses: map[string]stubRESTResponse{
 			firstPagePath: {
-				body: []pullRequestReview{
-					{
-						User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
-						State:       "APPROVED",
-						SubmittedAt: time.Unix(1, 0),
-					},
-				},
+				body: firstPageReviews,
 				headers: http.Header{
 					"Link": []string{
 						fmt.Sprintf("<https://api.github.com/%s>; rel=\"next\", <https://api.github.com/%s>; rel=\"last\"", secondPagePath, secondPagePath),
@@ -296,8 +297,8 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
-	if len(reviews) != len(pageTwo) {
-		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want %d", len(reviews), len(pageTwo))
+	if len(reviews) != len(firstPageReviews) {
+		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want %d", len(reviews), len(firstPageReviews))
 	}
 	if reviews[0].State != "APPROVED" {
 		t.Fatalf("fetchPullRequestReviewsREST() state = %q, want APPROVED", reviews[0].State)
