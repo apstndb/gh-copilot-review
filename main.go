@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -27,7 +28,7 @@ const (
 	pullRequestReviewsPerPage = 100
 	restPollingRequestCost    = 1
 	graphQLPollingRequestCost = 1
-	maxInt64                  = int64(^uint64(0) >> 1)
+	maxInt64                  = math.MaxInt64
 )
 
 type pollingBackend string
