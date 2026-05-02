@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,9 @@ func TestScalePollingWeight(t *testing.T) {
 	}
 	if got := scalePollingWeight(3, 10, 1); got != 30 {
 		t.Fatalf("scalePollingWeight() with unit cost = %d, want 30", got)
+	}
+	if got := scalePollingWeight(3, 10, 3); got != 10 {
+		t.Fatalf("scalePollingWeight() with non-unit cost = %d, want 10", got)
 	}
 }
 
@@ -581,6 +585,24 @@ func TestLastPagePath(t *testing.T) {
 			t.Fatal("lastPagePath() error = nil, want parse failure")
 		}
 	})
+
+	t.Run("handles escaped quotes inside quoted params", func(t *testing.T) {
+		t.Parallel()
+
+		path, ok, err := lastPagePath([]string{
+			`<https://api.github.com/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=4>; title="escaped \\\"quote, still title\\\""; rel="last"`,
+		})
+		if err != nil {
+			t.Fatalf("lastPagePath() error = %v", err)
+		}
+		if !ok {
+			t.Fatal("lastPagePath() ok = false, want true")
+		}
+		want := "repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=4"
+		if path != want {
+			t.Fatalf("lastPagePath() = %q, want %q", path, want)
+		}
+	})
 }
 
 type stubReviewStatusFetcher struct {
@@ -600,6 +622,7 @@ func (f *stubReviewStatusFetcher) Fetch(string, string, int) (reviewStatus, erro
 type stubRESTResponse struct {
 	body    interface{}
 	headers http.Header
+	rawBody []byte
 	status  int
 }
 
@@ -614,9 +637,13 @@ func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Res
 	if !ok {
 		response = stubRESTResponse{body: []pullRequestReview{}}
 	}
-	payload, err := json.Marshal(response.body)
-	if err != nil {
-		return nil, err
+	payload := response.rawBody
+	if payload == nil {
+		var err error
+		payload, err = json.Marshal(response.body)
+		if err != nil {
+			return nil, err
+		}
 	}
 	status := response.status
 	if status == 0 {
@@ -627,6 +654,27 @@ func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Res
 		Header:     response.headers.Clone(),
 		Body:       io.NopCloser(bytes.NewReader(payload)),
 	}, nil
+}
+
+func TestGetRESTJSONRejectsEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	client := &stubRESTGetter{
+		responses: map[string]stubRESTResponse{
+			"repos/apstndb/gh-copilot-review/pulls/3/reviews": {
+				rawBody: []byte{},
+			},
+		},
+	}
+
+	var response []pullRequestReview
+	_, err := getRESTJSON(client, "repos/apstndb/gh-copilot-review/pulls/3/reviews", &response)
+	if err == nil {
+		t.Fatal("getRESTJSON() error = nil, want empty response body error")
+	}
+	if !strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("getRESTJSON() error = %v, want empty response body", err)
+	}
 }
 
 func (g *stubRESTGetter) totalRequests() int {

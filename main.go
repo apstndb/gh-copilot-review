@@ -395,7 +395,7 @@ func scalePollingWeight(weight int64, remaining int, requestCost int64) int64 {
 		return 0
 	}
 	scaled := saturatingMul(weight, int64(remaining))
-	if requestCost <= 1 {
+	if requestCost == 1 {
 		return scaled
 	}
 	return scaled / requestCost
@@ -523,6 +523,9 @@ func getRESTJSON(client restRequester, path string, response interface{}) (http.
 		return nil, api.HandleHTTPError(resp)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("decode REST response for %s: empty response body", path)
+		}
 		return nil, fmt.Errorf("decode REST response for %s: %w", path, err)
 	}
 	return resp.Header.Clone(), nil
@@ -916,11 +919,23 @@ func splitHeaderValues(value string, separator rune) ([]string, error) {
 	var (
 		values   []string
 		current  strings.Builder
+		escaped  bool
 		inQuotes bool
 		inTarget bool
 	)
 	for _, r := range value {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
 		switch r {
+		case '\\':
+			if inQuotes {
+				current.WriteRune(r)
+				escaped = true
+				continue
+			}
 		case '"':
 			inQuotes = !inQuotes
 		case '<':
@@ -939,7 +954,7 @@ func splitHeaderValues(value string, separator rune) ([]string, error) {
 		}
 		current.WriteRune(r)
 	}
-	if inQuotes || inTarget {
+	if escaped || inQuotes || inTarget {
 		return nil, fmt.Errorf("unterminated header value: %q", value)
 	}
 	values = append(values, current.String())
