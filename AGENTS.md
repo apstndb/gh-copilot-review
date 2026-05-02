@@ -36,4 +36,4 @@ There is no repository-specific lint configuration or lint script checked in; re
   - review requests match `copilot`
   - completed reviews match `copilot-pull-request-reviewer`
   Preserve that behavior unless GitHub changes the identities exposed by the API.
-- When multiple Copilot reviews are returned, `fetchReviewStatus()` sorts them by `SubmittedAt` and uses the newest one as the status to report.
+- When multiple Copilot reviews are returned, the polling helpers still report the newest one by `SubmittedAt`: `fetchReviewStatusGraphQL()` sorts GraphQL reviews before selecting the latest, and the REST path tracks the latest Copilot review while scanning the returned pages.

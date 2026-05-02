@@ -2,7 +2,7 @@
 
 `gh-copilot-review` is a GitHub CLI extension for requesting GitHub Copilot review on a pull request and waiting for that review to finish.
 
-It uses `cobra` for subcommands and flags, and `go-gh` for GitHub CLI integration and GraphQL access.
+It uses `cobra` for subcommands and flags, and `go-gh` for GitHub CLI integration plus GitHub REST and GraphQL API access.
 
 ## Commands
 
