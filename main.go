@@ -99,6 +99,9 @@ func newRequestCmd() *cobra.Command {
 			if selector != "" {
 				ghArgs = append(ghArgs, selector)
 			}
+			// Keep delegating Copilot review requests to gh CLI. On github.com, @copilot
+			// is handled through GitHub's bot-reviewer GraphQL flow rather than behaving
+			// like a normal REST requested_reviewers entry.
 			ghArgs = append(ghArgs, "--add-reviewer", "@copilot")
 
 			stdout, stderr, err := gh.Exec(ghArgs...)

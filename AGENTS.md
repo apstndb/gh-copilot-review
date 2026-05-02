@@ -13,6 +13,7 @@ There is no repository-specific lint configuration or lint script checked in; re
 
 - This repository is a small Go-based GitHub CLI extension. The entire CLI currently lives in `main.go`, with `newRootCmd()` registering the `request` and `check` subcommands.
 - `request` is the write path. It shells out through `go-gh` to `gh pr edit [<pr>] --add-reviewer @copilot` and can immediately hand off to the same polling flow used by `check` when `--wait` is set.
+- On github.com, requesting Copilot review is not equivalent to posting to REST `requested_reviewers`. `gh pr edit --add-reviewer @copilot` maps `@copilot` to the `copilot-pull-request-reviewer` bot login and uses GitHub's GraphQL `requestReviewsByLogin` flow for bot reviewers; direct REST `requested_reviewers` calls are not a reliable replacement for Copilot.
 - `check` is the read/poll path. It resolves the target pull request, polls GitHub until Copilot is no longer pending by default, and supports a single-shot scripting mode via `--async`.
 - Pull request selection is intentionally consistent across commands: when no `<pr>` argument is provided, `resolvePR()` uses `gh pr view --json number,url` to target the PR for the current branch.
 - Review state combines two GitHub APIs:
