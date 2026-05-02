@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -18,6 +20,15 @@ import (
 const (
 	copilotRequestLogin = "copilot"
 	copilotReviewLogin  = "copilot-pull-request-reviewer"
+)
+
+type pollingBackend string
+
+const (
+	pollingBackendAuto    pollingBackend = "auto"
+	pollingBackendRandom  pollingBackend = "random"
+	pollingBackendGraphQL pollingBackend = "graphql"
+	pollingBackendREST    pollingBackend = "rest"
 )
 
 func main() {
@@ -49,6 +60,10 @@ func newRequestCmd() *cobra.Command {
 	var wait bool
 	var interval int
 	var timeout int
+	var backend string
+	var restWeight int
+	var graphqlWeight int
+	var autoAdjustWeights bool
 
 	cmd := &cobra.Command{
 		Use:   "request [<pr>]",
@@ -61,6 +76,13 @@ func newRequestCmd() *cobra.Command {
 			}
 			if shouldValidatePollingFlags(cmd, wait) {
 				if err := validatePollingFlags(interval, timeout); err != nil {
+					return err
+				}
+			}
+
+			polling := newPollingConfig(backend, restWeight, graphqlWeight, autoAdjustWeights)
+			if shouldValidateBackendFlags(cmd, wait) {
+				if err := validatePollingConfig(polling); err != nil {
 					return err
 				}
 			}
@@ -82,7 +104,7 @@ func newRequestCmd() *cobra.Command {
 				return err
 			}
 			if wait {
-				return pollReviewStatus(selector, interval, timeout, false)
+				return pollReviewStatus(selector, interval, timeout, false, polling)
 			}
 			return nil
 		},
@@ -91,6 +113,10 @@ func newRequestCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for Copilot review after requesting it")
 	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds with --wait; validated but otherwise ignored without --wait")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds with --wait (0 disables timeout); validated but otherwise ignored without --wait")
+	cmd.Flags().StringVar(&backend, "backend", string(pollingBackendAuto), "status polling backend with --wait: auto, random, rest, or graphql")
+	cmd.Flags().IntVar(&restWeight, "rest-weight", 1, "relative REST weight for adaptive polling backends; validated but otherwise ignored without --wait")
+	cmd.Flags().IntVar(&graphqlWeight, "graphql-weight", 1, "relative GraphQL weight for adaptive polling backends; validated but otherwise ignored without --wait")
+	cmd.Flags().BoolVar(&autoAdjustWeights, "auto-adjust-weights", false, "adapt backend weights from current rate limits for adaptive polling backends; ignored without --wait")
 	return cmd
 }
 
@@ -98,6 +124,10 @@ func newCheckCmd() *cobra.Command {
 	var interval int
 	var timeout int
 	var async bool
+	var backend string
+	var restWeight int
+	var graphqlWeight int
+	var autoAdjustWeights bool
 
 	cmd := &cobra.Command{
 		Use:   "check [<pr>]",
@@ -112,21 +142,46 @@ func newCheckCmd() *cobra.Command {
 				}
 			}
 
+			polling := newPollingConfig(backend, restWeight, graphqlWeight, autoAdjustWeights)
+			if err := validatePollingConfig(polling); err != nil {
+				return err
+			}
+
 			selector := ""
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return pollReviewStatus(selector, interval, timeout, async)
+			return pollReviewStatus(selector, interval, timeout, async, polling)
 		},
 	}
 
 	cmd.Flags().IntVar(&interval, "interval", 15, "poll interval in seconds when waiting; provided values are still validated with --async")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "stop waiting after N seconds (0 disables timeout); provided values are still validated with --async")
 	cmd.Flags().BoolVar(&async, "async", false, "perform a single check and exit immediately; returns non-zero while review is still pending")
+	cmd.Flags().StringVar(&backend, "backend", string(pollingBackendAuto), "status polling backend: auto, random, rest, or graphql")
+	cmd.Flags().IntVar(&restWeight, "rest-weight", 1, "relative REST weight for adaptive polling backends")
+	cmd.Flags().IntVar(&graphqlWeight, "graphql-weight", 1, "relative GraphQL weight for adaptive polling backends")
+	cmd.Flags().BoolVar(&autoAdjustWeights, "auto-adjust-weights", false, "adapt backend weights from current rate limits for adaptive polling backends")
 	return cmd
 }
 
-func pollReviewStatus(selector string, interval, timeout int, async bool) error {
+type pollingConfig struct {
+	Backend           pollingBackend
+	RESTWeight        int
+	GraphQLWeight     int
+	AutoAdjustWeights bool
+}
+
+func newPollingConfig(backend string, restWeight, graphqlWeight int, autoAdjustWeights bool) pollingConfig {
+	return pollingConfig{
+		Backend:           pollingBackend(strings.ToLower(backend)),
+		RESTWeight:        restWeight,
+		GraphQLWeight:     graphqlWeight,
+		AutoAdjustWeights: autoAdjustWeights,
+	}
+}
+
+func pollReviewStatus(selector string, interval, timeout int, async bool, polling pollingConfig) error {
 	target, err := resolvePR(selector)
 	if err != nil {
 		return err
@@ -135,18 +190,47 @@ func pollReviewStatus(selector string, interval, timeout int, async bool) error 
 	if err != nil {
 		return fmt.Errorf("resolve current repository: %w", err)
 	}
-	client, err := api.DefaultGraphQLClient()
-	if err != nil {
-		return fmt.Errorf("build GraphQL client: %w", err)
+
+	fetchers := make(map[pollingBackend]reviewStatusFetcher, 2)
+	var rateLimits rateLimitFetcher
+	if polling.Backend != pollingBackendREST {
+		client, err := api.DefaultGraphQLClient()
+		if err != nil {
+			return fmt.Errorf("build GraphQL client: %w", err)
+		}
+		fetchers[pollingBackendGraphQL] = graphQLReviewStatusFetcher{client: client}
+	}
+	if polling.Backend != pollingBackendGraphQL {
+		client, err := api.DefaultRESTClient()
+		if err != nil {
+			return fmt.Errorf("build REST client: %w", err)
+		}
+		fetchers[pollingBackendREST] = restReviewStatusFetcher{client: client}
+		if polling.AutoAdjustWeights && (polling.Backend == pollingBackendAuto || polling.Backend == pollingBackendRandom) {
+			rateLimits = restRateLimitFetcher{client: client}
+		}
 	}
 
+	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	deadline := time.Time{}
 	if timeout > 0 {
 		deadline = time.Now().Add(time.Duration(timeout) * time.Second)
 	}
 
 	for {
-		status, err := fetchReviewStatus(client, repo.Owner, repo.Name, target.Number)
+		var snapshot *rateLimitSnapshot
+		if rateLimits != nil {
+			limits, err := rateLimits.Fetch()
+			if err == nil {
+				snapshot = &limits
+			}
+		}
+
+		order, err := selectPollingBackends(polling, snapshot, random.Intn)
+		if err != nil {
+			return err
+		}
+		status, err := fetchReviewStatusWithFallback(order, fetchers, repo.Owner, repo.Name, target.Number)
 		if err != nil {
 			return err
 		}
@@ -172,16 +256,16 @@ func pollReviewStatus(selector string, interval, timeout int, async bool) error 
 	}
 }
 
-type pendingReviewError struct {
-	URL string
-}
-
-func (e pendingReviewError) Error() string {
-	return fmt.Sprintf("Copilot review is still pending on %s", e.URL)
-}
-
 func shouldValidatePollingFlags(cmd *cobra.Command, active bool) bool {
 	return active || cmd.Flags().Changed("interval") || cmd.Flags().Changed("timeout")
+}
+
+func shouldValidateBackendFlags(cmd *cobra.Command, active bool) bool {
+	return active ||
+		cmd.Flags().Changed("backend") ||
+		cmd.Flags().Changed("rest-weight") ||
+		cmd.Flags().Changed("graphql-weight") ||
+		cmd.Flags().Changed("auto-adjust-weights")
 }
 
 func validatePollingFlags(interval, timeout int) error {
@@ -192,6 +276,203 @@ func validatePollingFlags(interval, timeout int) error {
 		return fmt.Errorf("timeout must be non-negative: %d", timeout)
 	}
 	return nil
+}
+
+func validatePollingConfig(config pollingConfig) error {
+	switch config.Backend {
+	case pollingBackendAuto, pollingBackendRandom, pollingBackendGraphQL, pollingBackendREST:
+	default:
+		return fmt.Errorf("backend must be one of auto, random, rest, graphql: %q", config.Backend)
+	}
+	if config.RESTWeight < 0 {
+		return fmt.Errorf("rest-weight must be non-negative: %d", config.RESTWeight)
+	}
+	if config.GraphQLWeight < 0 {
+		return fmt.Errorf("graphql-weight must be non-negative: %d", config.GraphQLWeight)
+	}
+	if (config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom) &&
+		config.RESTWeight == 0 && config.GraphQLWeight == 0 {
+		return errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
+	}
+	return nil
+}
+
+func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, randomIntn func(int) int) ([]pollingBackend, error) {
+	switch config.Backend {
+	case pollingBackendGraphQL:
+		return []pollingBackend{pollingBackendGraphQL}, nil
+	case pollingBackendREST:
+		return []pollingBackend{pollingBackendREST}, nil
+	case pollingBackendAuto:
+		primary := preferredAutoBackend(config, limits)
+		return pollingBackendOrder(primary), nil
+	case pollingBackendRandom:
+		restWeight, graphqlWeight := effectivePollingWeights(config, limits)
+		primary, err := chooseWeightedBackend(restWeight, graphqlWeight, randomIntn)
+		if err != nil {
+			return nil, err
+		}
+		return pollingBackendOrder(primary), nil
+	default:
+		return nil, fmt.Errorf("unsupported polling backend: %q", config.Backend)
+	}
+}
+
+func preferredAutoBackend(config pollingConfig, limits *rateLimitSnapshot) pollingBackend {
+	if !config.AutoAdjustWeights || limits == nil {
+		return pollingBackendREST
+	}
+	restWeight, graphqlWeight := effectivePollingWeights(config, limits)
+	if graphqlWeight > restWeight {
+		return pollingBackendGraphQL
+	}
+	return pollingBackendREST
+}
+
+func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (restWeight, graphqlWeight int) {
+	restWeight = config.RESTWeight
+	graphqlWeight = config.GraphQLWeight
+	if !config.AutoAdjustWeights || limits == nil {
+		return restWeight, graphqlWeight
+	}
+
+	adjustedREST := restWeight
+	adjustedGraphQL := graphqlWeight
+	if adjustedREST > 0 {
+		adjustedREST *= max(limits.CoreRemaining, 0)
+	}
+	if adjustedGraphQL > 0 {
+		adjustedGraphQL *= max(limits.GraphQLRemaining, 0)
+	}
+	if adjustedREST == 0 && adjustedGraphQL == 0 {
+		return restWeight, graphqlWeight
+	}
+	return adjustedREST, adjustedGraphQL
+}
+
+func chooseWeightedBackend(restWeight, graphqlWeight int, randomIntn func(int) int) (pollingBackend, error) {
+	total := restWeight + graphqlWeight
+	if total <= 0 {
+		return "", errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
+	}
+	if randomIntn(total) < restWeight {
+		return pollingBackendREST, nil
+	}
+	return pollingBackendGraphQL, nil
+}
+
+func pollingBackendOrder(primary pollingBackend) []pollingBackend {
+	if primary == pollingBackendGraphQL {
+		return []pollingBackend{pollingBackendGraphQL, pollingBackendREST}
+	}
+	return []pollingBackend{pollingBackendREST, pollingBackendGraphQL}
+}
+
+type reviewStatusFetcher interface {
+	Fetch(owner, repo string, number int) (reviewStatus, error)
+}
+
+type graphQLReviewStatusFetcher struct {
+	client *api.GraphQLClient
+}
+
+func (f graphQLReviewStatusFetcher) Fetch(owner, repo string, number int) (reviewStatus, error) {
+	return fetchReviewStatusGraphQL(f.client, owner, repo, number)
+}
+
+type restReviewStatusFetcher struct {
+	client *api.RESTClient
+}
+
+func (f restReviewStatusFetcher) Fetch(owner, repo string, number int) (reviewStatus, error) {
+	return fetchReviewStatusREST(f.client, owner, repo, number)
+}
+
+type rateLimitFetcher interface {
+	Fetch() (rateLimitSnapshot, error)
+}
+
+type restRateLimitFetcher struct {
+	client *api.RESTClient
+}
+
+func (f restRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
+	return fetchRateLimitSnapshot(f.client)
+}
+
+func fetchReviewStatusWithFallback(order []pollingBackend, fetchers map[pollingBackend]reviewStatusFetcher, owner, repo string, number int) (reviewStatus, error) {
+	var errs []error
+	for index, backend := range order {
+		fetcher, ok := fetchers[backend]
+		if !ok {
+			return reviewStatus{}, fmt.Errorf("polling backend unavailable: %s", backend)
+		}
+
+		status, err := fetcher.Fetch(owner, repo, number)
+		if err == nil {
+			return status, nil
+		}
+
+		wrappedErr := fmt.Errorf("%s backend: %w", backend, err)
+		if index == len(order)-1 || len(order) == 1 || !isFallbackEligibleError(err) {
+			if len(errs) == 0 {
+				return reviewStatus{}, wrappedErr
+			}
+			return reviewStatus{}, errors.Join(append(errs, wrappedErr)...)
+		}
+		errs = append(errs, wrappedErr)
+	}
+
+	if len(errs) > 0 {
+		return reviewStatus{}, errors.Join(errs...)
+	}
+	return reviewStatus{}, errors.New("no polling backend selected")
+}
+
+func isFallbackEligibleError(err error) bool {
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.StatusCode == 429 || httpErr.StatusCode >= 500 {
+			return true
+		}
+		if httpErr.StatusCode == 403 {
+			return containsAny(strings.ToLower(httpErr.Message), "rate limit", "secondary rate", "abuse")
+		}
+	}
+
+	var graphQLErr *api.GraphQLError
+	if errors.As(err, &graphQLErr) {
+		return containsAny(strings.ToLower(graphQLErr.Error()), "rate limit", "secondary rate", "abuse", "timeout", "temporarily", "unavailable")
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var temporaryErr interface{ Temporary() bool }
+	if errors.As(err, &temporaryErr) && temporaryErr.Temporary() {
+		return true
+	}
+
+	return false
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+type pendingReviewError struct {
+	URL string
+}
+
+func (e pendingReviewError) Error() string {
+	return fmt.Sprintf("Copilot review is still pending on %s", e.URL)
 }
 
 type prTarget struct {
@@ -255,7 +536,7 @@ type reviewStatusResponse struct {
 	} `json:"repository"`
 }
 
-func fetchReviewStatus(client *api.GraphQLClient, owner, repo string, number int) (reviewStatus, error) {
+func fetchReviewStatusGraphQL(client *api.GraphQLClient, owner, repo string, number int) (reviewStatus, error) {
 	const query = `
 	query($owner:String!, $repo:String!, $number:Int!) {
 	  repository(owner:$owner, name:$repo) {
@@ -315,4 +596,92 @@ func fetchReviewStatus(client *api.GraphQLClient, owner, repo string, number int
 	}
 
 	return status, nil
+}
+
+type requestedReviewerUser struct {
+	Login string `json:"login"`
+}
+
+type requestedReviewersResponse struct {
+	Users []requestedReviewerUser `json:"users"`
+}
+
+type pullRequestReviewUser struct {
+	Login string `json:"login"`
+}
+
+type pullRequestReview struct {
+	User        pullRequestReviewUser `json:"user"`
+	State       string                `json:"state"`
+	SubmittedAt time.Time             `json:"submitted_at"`
+	CommitID    string                `json:"commit_id"`
+}
+
+func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number int) (reviewStatus, error) {
+	var requestedReviewers requestedReviewersResponse
+	if err := client.Get(fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number), &requestedReviewers); err != nil {
+		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
+	}
+
+	var reviews []pullRequestReview
+	if err := client.Get(fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number), &reviews); err != nil {
+		return reviewStatus{}, fmt.Errorf("query pull request reviews: %w", err)
+	}
+
+	return buildReviewStatusFromREST(requestedReviewers, reviews), nil
+}
+
+func buildReviewStatusFromREST(requestedReviewers requestedReviewersResponse, reviews []pullRequestReview) reviewStatus {
+	status := reviewStatus{}
+	for _, reviewer := range requestedReviewers.Users {
+		if strings.Contains(strings.ToLower(reviewer.Login), copilotRequestLogin) {
+			status.CopilotRequested = true
+			break
+		}
+	}
+
+	var copilotReviews []latestReview
+	for _, review := range reviews {
+		if strings.Contains(strings.ToLower(review.User.Login), copilotReviewLogin) {
+			copilotReviews = append(copilotReviews, latestReview{
+				State:       review.State,
+				SubmittedAt: review.SubmittedAt,
+			})
+		}
+	}
+	sort.Slice(copilotReviews, func(i, j int) bool {
+		return copilotReviews[i].SubmittedAt.Before(copilotReviews[j].SubmittedAt)
+	})
+	if len(copilotReviews) > 0 {
+		status.LatestCopilotReview = &copilotReviews[len(copilotReviews)-1]
+	}
+
+	return status
+}
+
+type rateLimitSnapshot struct {
+	CoreRemaining    int
+	GraphQLRemaining int
+}
+
+type rateLimitResponse struct {
+	Resources struct {
+		Core struct {
+			Remaining int `json:"remaining"`
+		} `json:"core"`
+		GraphQL struct {
+			Remaining int `json:"remaining"`
+		} `json:"graphql"`
+	} `json:"resources"`
+}
+
+func fetchRateLimitSnapshot(client *api.RESTClient) (rateLimitSnapshot, error) {
+	var resp rateLimitResponse
+	if err := client.Get("rate_limit", &resp); err != nil {
+		return rateLimitSnapshot{}, fmt.Errorf("query rate limits: %w", err)
+	}
+	return rateLimitSnapshot{
+		CoreRemaining:    resp.Resources.Core.Remaining,
+		GraphQLRemaining: resp.Resources.GraphQL.Remaining,
+	}, nil
 }
