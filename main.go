@@ -361,11 +361,11 @@ func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (r
 	adjustedREST := restWeight
 	adjustedGraphQL := graphqlWeight
 	if adjustedREST > 0 {
-		adjustedREST = saturatingMul(adjustedREST, int64(max(limits.CoreRemaining, 0)), graphQLPollingRequestCost)
+		// Pending REST polling short-circuits after requested_reviewers, so the common polling path stays at one request.
+		adjustedREST = saturatingMul(adjustedREST, int64(max(limits.CoreRemaining, 0)), restPollingRequestCost)
 	}
 	if adjustedGraphQL > 0 {
-		// Pending REST polling short-circuits after requested_reviewers, so the common polling path stays at one request.
-		adjustedGraphQL = saturatingMul(adjustedGraphQL, int64(max(limits.GraphQLRemaining, 0)), restPollingRequestCost)
+		adjustedGraphQL = saturatingMul(adjustedGraphQL, int64(max(limits.GraphQLRemaining, 0)), graphQLPollingRequestCost)
 	}
 	if adjustedREST == 0 && adjustedGraphQL == 0 {
 		return restWeight, graphqlWeight
@@ -397,13 +397,6 @@ func saturatingMul(values ...int64) int64 {
 		result *= value
 	}
 	return result
-}
-
-func saturatingAdd(left, right int64) int64 {
-	if maxInt64-left < right {
-		return maxInt64
-	}
-	return left + right
 }
 
 func normalizeWeightedPair(left, right int64) (int64, int64) {
