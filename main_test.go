@@ -155,6 +155,18 @@ func TestSelectPollingBackends(t *testing.T) {
 			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
 		},
 		{
+			name: "auto adjust accounts for REST request cost",
+			config: pollingConfig{
+				Backend:           pollingBackendAuto,
+				RESTWeight:        1,
+				GraphQLWeight:     1,
+				AutoAdjustWeights: true,
+			},
+			limits:    &rateLimitSnapshot{CoreRemaining: 10, GraphQLRemaining: 10},
+			randomInt: func(int) int { return 0 },
+			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
+		},
+		{
 			name: "random honors configured weights",
 			config: pollingConfig{
 				Backend:       pollingBackendRandom,

@@ -24,6 +24,8 @@ const (
 	copilotRequestLogin       = "copilot"
 	copilotReviewLogin        = "copilot-pull-request-reviewer"
 	pullRequestReviewsPerPage = 100
+	restPollingRequestCost    = 2
+	graphQLPollingRequestCost = 1
 )
 
 type pollingBackend string
@@ -357,10 +359,11 @@ func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (r
 	adjustedREST := restWeight
 	adjustedGraphQL := graphqlWeight
 	if adjustedREST > 0 {
-		adjustedREST *= max(limits.CoreRemaining, 0)
+		adjustedREST *= max(limits.CoreRemaining, 0) * graphQLPollingRequestCost
 	}
 	if adjustedGraphQL > 0 {
-		adjustedGraphQL *= max(limits.GraphQLRemaining, 0)
+		// REST polling currently needs requested_reviewers + reviews, while GraphQL uses one query.
+		adjustedGraphQL *= max(limits.GraphQLRemaining, 0) * restPollingRequestCost
 	}
 	if adjustedREST == 0 && adjustedGraphQL == 0 {
 		return restWeight, graphqlWeight
