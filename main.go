@@ -493,11 +493,12 @@ type cachedRateLimitFetcher struct {
 }
 
 func (f *cachedRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
-	now := time.Now
-	if f.now != nil {
-		now = f.now
+	nowFunc := f.now
+	if nowFunc == nil {
+		nowFunc = time.Now
 	}
-	if f.hasCached && now().Sub(f.cachedAt) < f.minRefresh {
+	now := nowFunc()
+	if f.hasCached && now.Sub(f.cachedAt) < f.minRefresh {
 		return f.cached, nil
 	}
 
@@ -506,7 +507,7 @@ func (f *cachedRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
 		return rateLimitSnapshot{}, err
 	}
 	f.cached = snapshot
-	f.cachedAt = now()
+	f.cachedAt = now
 	f.hasCached = true
 	return snapshot, nil
 }

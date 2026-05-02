@@ -488,6 +488,7 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
+	nowCalls := 0
 	source := &stubRateLimitFetcher{
 		snapshots: []rateLimitSnapshot{
 			{CoreRemaining: 10, GraphQLRemaining: 20},
@@ -498,6 +499,7 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 		fetcher:    source,
 		minRefresh: time.Minute,
 		now: func() time.Time {
+			nowCalls++
 			return now
 		},
 	}
@@ -516,6 +518,9 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	if source.calls != 1 {
 		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 1", source.calls)
 	}
+	if nowCalls != 2 {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() now calls after two fetches = %d, want 2", nowCalls)
+	}
 
 	now = now.Add(2 * time.Minute)
 	third, err := cache.Fetch()
@@ -527,6 +532,9 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	}
 	if source.calls != 2 {
 		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 2", source.calls)
+	}
+	if nowCalls != 3 {
+		t.Fatalf("cachedRateLimitFetcher.Fetch() total now calls = %d, want 3", nowCalls)
 	}
 }
 
