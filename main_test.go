@@ -98,8 +98,23 @@ func TestValidatePollingConfigForCommand(t *testing.T) {
 		RESTWeight:    2,
 		GraphQLWeight: 1,
 	})
-	if err == nil || !containsAny(err.Error(), "require --backend auto or random") {
-		t.Fatalf("validatePollingConfigForCommand() error = %v, want adaptive-backend validation", err)
+	if err == nil {
+		t.Fatal("validatePollingConfigForCommand() error = nil, want adaptive-backend validation")
+	}
+	want := "--rest-weight requires --backend auto or random"
+	if err.Error() != want {
+		t.Fatalf("validatePollingConfigForCommand() error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestScalePollingWeight(t *testing.T) {
+	t.Parallel()
+
+	if got := scalePollingWeight(3, 10, 2); got != 15 {
+		t.Fatalf("scalePollingWeight() = %d, want 15", got)
+	}
+	if got := scalePollingWeight(3, 10, 1); got != 30 {
+		t.Fatalf("scalePollingWeight() with unit cost = %d, want 30", got)
 	}
 }
 

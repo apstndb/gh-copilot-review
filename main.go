@@ -316,8 +316,21 @@ func validatePollingConfigForCommand(cmd *cobra.Command, config pollingConfig) e
 	if config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom {
 		return nil
 	}
-	if cmd.Flags().Changed("rest-weight") || cmd.Flags().Changed("graphql-weight") || cmd.Flags().Changed("auto-adjust-weights") {
-		return errors.New("rest-weight, graphql-weight, and auto-adjust-weights require --backend auto or random")
+	var changedFlags []string
+	if cmd.Flags().Changed("rest-weight") {
+		changedFlags = append(changedFlags, "--rest-weight")
+	}
+	if cmd.Flags().Changed("graphql-weight") {
+		changedFlags = append(changedFlags, "--graphql-weight")
+	}
+	if cmd.Flags().Changed("auto-adjust-weights") {
+		changedFlags = append(changedFlags, "--auto-adjust-weights")
+	}
+	if len(changedFlags) == 1 {
+		return fmt.Errorf("%s requires --backend auto or random", changedFlags[0])
+	}
+	if len(changedFlags) > 1 {
+		return fmt.Errorf("%s require --backend auto or random", strings.Join(changedFlags, ", "))
 	}
 	return nil
 }
@@ -362,15 +375,26 @@ func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (r
 	adjustedGraphQL := graphqlWeight
 	if adjustedREST > 0 {
 		// Pending REST polling short-circuits after requested_reviewers, so the common polling path stays at one request.
-		adjustedREST = saturatingMul(adjustedREST, int64(max(limits.CoreRemaining, 0)), restPollingRequestCost)
+		adjustedREST = scalePollingWeight(adjustedREST, max(limits.CoreRemaining, 0), restPollingRequestCost)
 	}
 	if adjustedGraphQL > 0 {
-		adjustedGraphQL = saturatingMul(adjustedGraphQL, int64(max(limits.GraphQLRemaining, 0)), graphQLPollingRequestCost)
+		adjustedGraphQL = scalePollingWeight(adjustedGraphQL, max(limits.GraphQLRemaining, 0), graphQLPollingRequestCost)
 	}
 	if adjustedREST == 0 && adjustedGraphQL == 0 {
 		return restWeight, graphqlWeight
 	}
 	return adjustedREST, adjustedGraphQL
+}
+
+func scalePollingWeight(weight int64, remaining int, requestCost int64) int64 {
+	if weight <= 0 || remaining <= 0 {
+		return 0
+	}
+	scaled := saturatingMul(weight, int64(remaining))
+	if requestCost <= 1 {
+		return scaled
+	}
+	return scaled / requestCost
 }
 
 func chooseWeightedBackend(restWeight, graphqlWeight int64, randomInt63n func(int64) int64) (pollingBackend, error) {
