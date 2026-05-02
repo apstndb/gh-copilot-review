@@ -109,7 +109,7 @@ func TestSelectPollingBackends(t *testing.T) {
 		name      string
 		config    pollingConfig
 		limits    *rateLimitSnapshot
-		randomInt func(int) int
+		randomInt func(int64) int64
 		want      []pollingBackend
 	}{
 		{
@@ -119,7 +119,7 @@ func TestSelectPollingBackends(t *testing.T) {
 				RESTWeight:    1,
 				GraphQLWeight: 1,
 			},
-			randomInt: func(int) int { return 0 },
+			randomInt: func(int64) int64 { return 0 },
 			want:      []pollingBackend{pollingBackendREST},
 		},
 		{
@@ -129,7 +129,7 @@ func TestSelectPollingBackends(t *testing.T) {
 				RESTWeight:    1,
 				GraphQLWeight: 1,
 			},
-			randomInt: func(int) int { return 0 },
+			randomInt: func(int64) int64 { return 0 },
 			want:      []pollingBackend{pollingBackendREST, pollingBackendGraphQL},
 		},
 		{
@@ -139,7 +139,7 @@ func TestSelectPollingBackends(t *testing.T) {
 				RESTWeight:    1,
 				GraphQLWeight: 2,
 			},
-			randomInt: func(int) int { return 0 },
+			randomInt: func(int64) int64 { return 0 },
 			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
 		},
 		{
@@ -151,11 +151,11 @@ func TestSelectPollingBackends(t *testing.T) {
 				AutoAdjustWeights: true,
 			},
 			limits:    &rateLimitSnapshot{CoreRemaining: 1, GraphQLRemaining: 20},
-			randomInt: func(int) int { return 0 },
+			randomInt: func(int64) int64 { return 0 },
 			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
 		},
 		{
-			name: "auto adjust accounts for REST request cost",
+			name: "auto adjust keeps rest preference when quotas are equal",
 			config: pollingConfig{
 				Backend:           pollingBackendAuto,
 				RESTWeight:        1,
@@ -163,8 +163,8 @@ func TestSelectPollingBackends(t *testing.T) {
 				AutoAdjustWeights: true,
 			},
 			limits:    &rateLimitSnapshot{CoreRemaining: 10, GraphQLRemaining: 10},
-			randomInt: func(int) int { return 0 },
-			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
+			randomInt: func(int64) int64 { return 0 },
+			want:      []pollingBackend{pollingBackendREST, pollingBackendGraphQL},
 		},
 		{
 			name: "random honors configured weights",
@@ -173,7 +173,7 @@ func TestSelectPollingBackends(t *testing.T) {
 				RESTWeight:    3,
 				GraphQLWeight: 1,
 			},
-			randomInt: func(int) int { return 3 },
+			randomInt: func(int64) int64 { return 3 },
 			want:      []pollingBackend{pollingBackendGraphQL, pollingBackendREST},
 		},
 	}
@@ -246,8 +246,8 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 
 	pageTwo := []pullRequestReview{
 		{
-			User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
-			State:       "APPROVED",
+			User:        pullRequestReviewUser{Login: "reviewer"},
+			State:       "COMMENTED",
 			SubmittedAt: time.Unix(999, 0),
 		},
 	}
@@ -257,8 +257,8 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 			"repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100": {
 				body: []pullRequestReview{
 					{
-						User:        pullRequestReviewUser{Login: "reviewer"},
-						State:       "COMMENTED",
+						User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
+						State:       "APPROVED",
 						SubmittedAt: time.Unix(1, 0),
 					},
 				},
@@ -283,6 +283,46 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 	}
 	if reviews[0].State != "APPROVED" {
 		t.Fatalf("fetchPullRequestReviewsREST() state = %q, want APPROVED", reviews[0].State)
+	}
+}
+
+func TestFetchReviewStatusRESTSkipsReviewsWhilePending(t *testing.T) {
+	t.Parallel()
+
+	client := &stubRESTGetter{
+		responses: map[string]stubRESTResponse{
+			"repos/apstndb/gh-copilot-review/pulls/3/requested_reviewers": {
+				body: requestedReviewersResponse{
+					Users: []requestedReviewerUser{{Login: "copilot[bot]"}},
+				},
+			},
+		},
+	}
+
+	status, err := fetchReviewStatusRESTWithRequester(client, "apstndb", "gh-copilot-review", 3)
+	if err != nil {
+		t.Fatalf("fetchReviewStatusREST() error = %v", err)
+	}
+	if !status.CopilotRequested {
+		t.Fatal("fetchReviewStatusREST() did not keep pending Copilot request")
+	}
+	if client.requestCount("repos/apstndb/gh-copilot-review/pulls/3/requested_reviewers") != 1 {
+		t.Fatal("fetchReviewStatusREST() did not query requested_reviewers exactly once")
+	}
+	if client.totalRequests() != 1 {
+		t.Fatalf("fetchReviewStatusREST() total requests = %d, want 1", client.totalRequests())
+	}
+}
+
+func TestChooseWeightedBackendHandlesLargeWeights(t *testing.T) {
+	t.Parallel()
+
+	backend, err := chooseWeightedBackend(maxInt64, maxInt64, func(total int64) int64 { return total - 1 })
+	if err != nil {
+		t.Fatalf("chooseWeightedBackend() error = %v", err)
+	}
+	if backend != pollingBackendGraphQL {
+		t.Fatalf("chooseWeightedBackend() = %q, want graphql", backend)
 	}
 }
 
@@ -431,9 +471,11 @@ type stubRESTResponse struct {
 
 type stubRESTGetter struct {
 	responses map[string]stubRESTResponse
+	requests  []string
 }
 
 func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Response, error) {
+	g.requests = append(g.requests, path)
 	response, ok := g.responses[path]
 	if !ok {
 		response = stubRESTResponse{body: []pullRequestReview{}}
@@ -451,6 +493,20 @@ func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Res
 		Header:     response.headers.Clone(),
 		Body:       io.NopCloser(bytes.NewReader(payload)),
 	}, nil
+}
+
+func (g *stubRESTGetter) totalRequests() int {
+	return len(g.requests)
+}
+
+func (g *stubRESTGetter) requestCount(path string) int {
+	count := 0
+	for _, requestPath := range g.requests {
+		if requestPath == path {
+			count++
+		}
+	}
+	return count
 }
 
 type stubRateLimitFetcher struct {

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,8 +25,9 @@ const (
 	copilotRequestLogin       = "copilot"
 	copilotReviewLogin        = "copilot-pull-request-reviewer"
 	pullRequestReviewsPerPage = 100
-	restPollingRequestCost    = 2
+	restPollingRequestCost    = 1
 	graphQLPollingRequestCost = 1
+	maxInt64                  = int64(^uint64(0) >> 1)
 )
 
 type pollingBackend string
@@ -236,7 +238,7 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 			}
 		}
 
-		order, err := selectPollingBackends(polling, snapshot, random.Intn)
+		order, err := selectPollingBackends(polling, snapshot, random.Int63n)
 		if err != nil {
 			return err
 		}
@@ -320,7 +322,7 @@ func validatePollingConfigForCommand(cmd *cobra.Command, config pollingConfig) e
 	return nil
 }
 
-func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, randomIntn func(int) int) ([]pollingBackend, error) {
+func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, randomInt63n func(int64) int64) ([]pollingBackend, error) {
 	switch config.Backend {
 	case pollingBackendGraphQL:
 		return []pollingBackend{pollingBackendGraphQL}, nil
@@ -331,7 +333,7 @@ func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, rand
 		return pollingBackendOrder(primary), nil
 	case pollingBackendRandom:
 		restWeight, graphqlWeight := effectivePollingWeights(config, limits)
-		primary, err := chooseWeightedBackend(restWeight, graphqlWeight, randomIntn)
+		primary, err := chooseWeightedBackend(restWeight, graphqlWeight, randomInt63n)
 		if err != nil {
 			return nil, err
 		}
@@ -349,9 +351,9 @@ func preferredAutoBackend(config pollingConfig, limits *rateLimitSnapshot) polli
 	return pollingBackendREST
 }
 
-func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (restWeight, graphqlWeight int) {
-	restWeight = config.RESTWeight
-	graphqlWeight = config.GraphQLWeight
+func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (restWeight, graphqlWeight int64) {
+	restWeight = int64(config.RESTWeight)
+	graphqlWeight = int64(config.GraphQLWeight)
 	if !config.AutoAdjustWeights || limits == nil {
 		return restWeight, graphqlWeight
 	}
@@ -359,11 +361,11 @@ func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (r
 	adjustedREST := restWeight
 	adjustedGraphQL := graphqlWeight
 	if adjustedREST > 0 {
-		adjustedREST *= max(limits.CoreRemaining, 0) * graphQLPollingRequestCost
+		adjustedREST = saturatingMul(adjustedREST, int64(max(limits.CoreRemaining, 0)), graphQLPollingRequestCost)
 	}
 	if adjustedGraphQL > 0 {
-		// REST polling currently needs requested_reviewers + reviews, while GraphQL uses one query.
-		adjustedGraphQL *= max(limits.GraphQLRemaining, 0) * restPollingRequestCost
+		// Pending REST polling short-circuits after requested_reviewers, so the common polling path stays at one request.
+		adjustedGraphQL = saturatingMul(adjustedGraphQL, int64(max(limits.GraphQLRemaining, 0)), restPollingRequestCost)
 	}
 	if adjustedREST == 0 && adjustedGraphQL == 0 {
 		return restWeight, graphqlWeight
@@ -371,15 +373,49 @@ func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (r
 	return adjustedREST, adjustedGraphQL
 }
 
-func chooseWeightedBackend(restWeight, graphqlWeight int, randomIntn func(int) int) (pollingBackend, error) {
+func chooseWeightedBackend(restWeight, graphqlWeight int64, randomInt63n func(int64) int64) (pollingBackend, error) {
+	restWeight, graphqlWeight = normalizeWeightedPair(restWeight, graphqlWeight)
 	total := restWeight + graphqlWeight
 	if total <= 0 {
 		return "", errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
 	}
-	if randomIntn(total) < restWeight {
+	if randomInt63n(total) < restWeight {
 		return pollingBackendREST, nil
 	}
 	return pollingBackendGraphQL, nil
+}
+
+func saturatingMul(values ...int64) int64 {
+	result := int64(1)
+	for _, value := range values {
+		if value == 0 {
+			return 0
+		}
+		if result > maxInt64/value {
+			return maxInt64
+		}
+		result *= value
+	}
+	return result
+}
+
+func saturatingAdd(left, right int64) int64 {
+	if maxInt64-left < right {
+		return maxInt64
+	}
+	return left + right
+}
+
+func normalizeWeightedPair(left, right int64) (int64, int64) {
+	for left > maxInt64-right {
+		if left > 1 {
+			left = left/2 + left%2
+		}
+		if right > 1 {
+			right = right/2 + right%2
+		}
+	}
+	return left, right
 }
 
 func pollingBackendOrder(primary pollingBackend) []pollingBackend {
@@ -688,9 +724,18 @@ type pullRequestReview struct {
 }
 
 func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number int) (reviewStatus, error) {
+	return fetchReviewStatusRESTWithRequester(client, owner, repo, number)
+}
+
+func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string, number int) (reviewStatus, error) {
 	var requestedReviewers requestedReviewersResponse
 	if _, err := getRESTJSON(client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number), &requestedReviewers); err != nil {
 		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
+	}
+	status := buildReviewStatusFromREST(requestedReviewers, nil)
+	if status.CopilotRequested {
+		// While Copilot is still requested, requested_reviewers alone is enough to keep polling.
+		return status, nil
 	}
 
 	reviews, err := fetchPullRequestReviewsREST(client, owner, repo, number)
@@ -703,8 +748,8 @@ func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number in
 
 func fetchPullRequestReviewsREST(client restRequester, owner, repo string, number int) ([]pullRequestReview, error) {
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d", owner, repo, number, pullRequestReviewsPerPage)
-	var reviews []pullRequestReview
-	headers, err := getRESTJSON(client, path, &reviews)
+	var firstPageReviews []pullRequestReview
+	headers, err := getRESTJSON(client, path, &firstPageReviews)
 	if err != nil {
 		return nil, fmt.Errorf("query pull request reviews: %w", err)
 	}
@@ -714,12 +759,37 @@ func fetchPullRequestReviewsREST(client restRequester, owner, repo string, numbe
 		return nil, err
 	}
 	if !ok || lastPath == path {
-		return reviews, nil
+		return firstPageReviews, nil
 	}
 
 	var latestPage []pullRequestReview
 	if _, err := getRESTJSON(client, lastPath, &latestPage); err != nil {
 		return nil, fmt.Errorf("query last pull request review page: %w", err)
+	}
+	if containsCopilotReview(latestPage) {
+		return latestPage, nil
+	}
+
+	lastPageNumber, err := pageNumber(lastPath)
+	if err != nil {
+		return nil, err
+	}
+	for page := lastPageNumber - 1; page >= 2; page-- {
+		currentPath, err := setPage(lastPath, page)
+		if err != nil {
+			return nil, err
+		}
+
+		var currentPage []pullRequestReview
+		if _, err := getRESTJSON(client, currentPath, &currentPage); err != nil {
+			return nil, fmt.Errorf("query pull request review page %d: %w", page, err)
+		}
+		if containsCopilotReview(currentPage) {
+			return currentPage, nil
+		}
+	}
+	if containsCopilotReview(firstPageReviews) {
+		return firstPageReviews, nil
 	}
 	return latestPage, nil
 }
@@ -750,6 +820,15 @@ func buildReviewStatusFromREST(requestedReviewers requestedReviewersResponse, re
 	return status
 }
 
+func containsCopilotReview(reviews []pullRequestReview) bool {
+	for _, review := range reviews {
+		if strings.Contains(strings.ToLower(review.User.Login), copilotReviewLogin) {
+			return true
+		}
+	}
+	return false
+}
+
 func lastPagePath(linkHeaders []string) (string, bool, error) {
 	for _, linkHeader := range linkHeaders {
 		for _, part := range strings.Split(linkHeader, ",") {
@@ -777,6 +856,41 @@ func lastPagePath(linkHeaders []string) (string, bool, error) {
 		}
 	}
 	return "", false, nil
+}
+
+func pageNumber(path string) (int, error) {
+	target, err := url.Parse(path)
+	if err != nil {
+		return 0, fmt.Errorf("parse page path: %w", err)
+	}
+
+	pageValue := target.Query().Get("page")
+	if pageValue == "" {
+		return 1, nil
+	}
+
+	page, err := strconv.Atoi(pageValue)
+	if err != nil {
+		return 0, fmt.Errorf("parse page number %q: %w", pageValue, err)
+	}
+	return page, nil
+}
+
+func setPage(path string, page int) (string, error) {
+	target, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("parse page path: %w", err)
+	}
+
+	query := target.Query()
+	query.Set("page", strconv.Itoa(page))
+	target.RawQuery = query.Encode()
+
+	updatedPath := strings.TrimPrefix(target.EscapedPath(), "/")
+	if target.RawQuery != "" {
+		updatedPath += "?" + target.RawQuery
+	}
+	return updatedPath, nil
 }
 
 type rateLimitSnapshot struct {
