@@ -471,6 +471,18 @@ func TestFetchReviewStatusWithFallback(t *testing.T) {
 			t.Fatalf("fetchReviewStatusWithFallback() graphql calls = %d, want 0", graphql.calls)
 		}
 	})
+
+	t.Run("errors when no backend is selected", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := fetchReviewStatusWithFallback(nil, nil, "apstndb", "gh-copilot-review", 2)
+		if err == nil {
+			t.Fatal("fetchReviewStatusWithFallback() error = nil, want empty-order error")
+		}
+		if err.Error() != "no polling backend selected" {
+			t.Fatalf("fetchReviewStatusWithFallback() error = %v, want no polling backend selected", err)
+		}
+	})
 }
 
 func TestIsFallbackEligibleError(t *testing.T) {

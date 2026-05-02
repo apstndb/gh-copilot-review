@@ -550,10 +550,6 @@ func fetchReviewStatusWithFallback(order []pollingBackend, fetchers map[pollingB
 		}
 		errs = append(errs, wrappedErr)
 	}
-
-	if len(errs) > 0 {
-		return reviewStatus{}, errors.Join(errs...)
-	}
 	return reviewStatus{}, errors.New("no polling backend selected")
 }
 
