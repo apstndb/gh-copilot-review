@@ -870,7 +870,7 @@ func lastPagePath(linkHeaders []string) (string, bool, error) {
 				return "", false, fmt.Errorf("parse Link target: %w", err)
 			}
 
-			return strings.TrimPrefix(target.RequestURI(), "/"), true, nil
+			return requestTargetString(target), true, nil
 		}
 	}
 	return "", false, nil
@@ -998,7 +998,14 @@ func setPage(path string, page int) (string, error) {
 	query.Set("page", strconv.Itoa(page))
 	target.RawQuery = query.Encode()
 
-	return strings.TrimPrefix(target.RequestURI(), "/"), nil
+	return requestTargetString(target), nil
+}
+
+func requestTargetString(target *url.URL) string {
+	if target.IsAbs() && !strings.EqualFold(target.Host, "api.github.com") {
+		return target.String()
+	}
+	return strings.TrimPrefix(target.RequestURI(), "/")
 }
 
 type rateLimitSnapshot struct {

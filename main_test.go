@@ -371,6 +371,68 @@ func TestFetchPullRequestReviewsRESTScansBackwardPages(t *testing.T) {
 	}
 }
 
+func TestFetchPullRequestReviewsRESTPreservesEnterprisePaginationURL(t *testing.T) {
+	t.Parallel()
+
+	firstPagePath := fmt.Sprintf("repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=%d", pullRequestReviewsPerPage)
+	lastPageURL := "https://ghe.example.com/api/v3/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=3"
+	secondPageURL, err := setPage(lastPageURL, 2)
+	if err != nil {
+		t.Fatalf("setPage() error = %v", err)
+	}
+
+	client := &stubRESTGetter{
+		responses: map[string]stubRESTResponse{
+			firstPagePath: {
+				body: []pullRequestReview{
+					{
+						User:        pullRequestReviewUser{Login: "reviewer"},
+						State:       "COMMENTED",
+						SubmittedAt: time.Unix(1, 0),
+					},
+				},
+				headers: http.Header{
+					"Link": []string{
+						fmt.Sprintf("<%s>; rel=\"last\"", lastPageURL),
+					},
+				},
+			},
+			secondPageURL: {
+				body: []pullRequestReview{
+					{
+						User:        pullRequestReviewUser{Login: "copilot-pull-request-reviewer[bot]"},
+						State:       "APPROVED",
+						SubmittedAt: time.Unix(2, 0),
+					},
+				},
+			},
+			lastPageURL: {
+				body: []pullRequestReview{
+					{
+						User:        pullRequestReviewUser{Login: "reviewer"},
+						State:       "COMMENTED",
+						SubmittedAt: time.Unix(3, 0),
+					},
+				},
+			},
+		},
+	}
+
+	reviews, err := fetchPullRequestReviewsREST(client, "apstndb", "gh-copilot-review", 3)
+	if err != nil {
+		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("fetchPullRequestReviewsREST() len = %d, want 1", len(reviews))
+	}
+	if reviews[0].User.Login != "copilot-pull-request-reviewer[bot]" {
+		t.Fatalf("fetchPullRequestReviewsREST() reviewer = %q, want enterprise backward scan result", reviews[0].User.Login)
+	}
+	if client.requestCount(lastPageURL) != 1 || client.requestCount(secondPageURL) != 1 {
+		t.Fatalf("fetchPullRequestReviewsREST() enterprise requests = page2:%d page3:%d, want 1/1", client.requestCount(secondPageURL), client.requestCount(lastPageURL))
+	}
+}
+
 func TestFetchReviewStatusRESTSkipsReviewsWhilePending(t *testing.T) {
 	t.Parallel()
 
@@ -599,6 +661,24 @@ func TestLastPagePath(t *testing.T) {
 			t.Fatal("lastPagePath() ok = false, want true")
 		}
 		want := "repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=4"
+		if path != want {
+			t.Fatalf("lastPagePath() = %q, want %q", path, want)
+		}
+	})
+
+	t.Run("preserves enterprise absolute targets", func(t *testing.T) {
+		t.Parallel()
+
+		path, ok, err := lastPagePath([]string{
+			`<https://ghe.example.com/api/v3/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=4>; rel="last"`,
+		})
+		if err != nil {
+			t.Fatalf("lastPagePath() error = %v", err)
+		}
+		if !ok {
+			t.Fatal("lastPagePath() ok = false, want true")
+		}
+		want := "https://ghe.example.com/api/v3/repos/apstndb/gh-copilot-review/pulls/3/reviews?per_page=100&page=4"
 		if path != want {
 			t.Fatalf("lastPagePath() = %q, want %q", path, want)
 		}
