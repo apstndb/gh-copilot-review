@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -20,25 +20,27 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	"github.com/spf13/cobra"
+
+	"github.com/apstndb/gh-copilot-review/internal/ghapiops"
 )
 
 const (
 	copilotRequestLogin       = "copilot"
 	copilotReviewLogin        = "copilot-pull-request-reviewer"
 	pullRequestReviewsPerPage = 100
-	restPollingRequestCost    = 1
-	graphQLPollingRequestCost = 1
-	maxInt64                  = math.MaxInt64
 )
 
-type pollingBackend string
+type pollingBackend = ghapiops.Backend
 
 const (
-	pollingBackendAuto    pollingBackend = "auto"
-	pollingBackendRandom  pollingBackend = "random"
-	pollingBackendGraphQL pollingBackend = "graphql"
-	pollingBackendREST    pollingBackend = "rest"
+	pollingBackendAuto    pollingBackend = ghapiops.BackendAuto
+	pollingBackendRandom  pollingBackend = ghapiops.BackendRandom
+	pollingBackendGraphQL pollingBackend = ghapiops.BackendGraphQL
+	pollingBackendREST    pollingBackend = ghapiops.BackendREST
 )
+
+type pollingConfig = ghapiops.Config
+type rateLimitSnapshot = ghapiops.RateLimitSnapshot
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -116,7 +118,7 @@ func newRequestCmd() *cobra.Command {
 				return err
 			}
 			if wait {
-				return pollReviewStatus(selector, interval, timeout, false, polling)
+				return pollReviewStatus(cmd.Context(), selector, interval, timeout, false, polling)
 			}
 			return nil
 		},
@@ -163,7 +165,7 @@ func newCheckCmd() *cobra.Command {
 			if len(args) == 1 {
 				selector = args[0]
 			}
-			return pollReviewStatus(selector, interval, timeout, async, polling)
+			return pollReviewStatus(cmd.Context(), selector, interval, timeout, async, polling)
 		},
 	}
 
@@ -177,23 +179,11 @@ func newCheckCmd() *cobra.Command {
 	return cmd
 }
 
-type pollingConfig struct {
-	Backend           pollingBackend
-	RESTWeight        int
-	GraphQLWeight     int
-	AutoAdjustWeights bool
-}
-
 func newPollingConfig(backend string, restWeight, graphqlWeight int, autoAdjustWeights bool) pollingConfig {
-	return pollingConfig{
-		Backend:           pollingBackend(strings.ToLower(backend)),
-		RESTWeight:        restWeight,
-		GraphQLWeight:     graphqlWeight,
-		AutoAdjustWeights: autoAdjustWeights,
-	}
+	return ghapiops.NewConfig(backend, restWeight, graphqlWeight, autoAdjustWeights)
 }
 
-func pollReviewStatus(selector string, interval, timeout int, async bool, polling pollingConfig) error {
+func pollReviewStatus(ctx context.Context, selector string, interval, timeout int, async bool, polling pollingConfig) error {
 	target, err := resolvePR(selector)
 	if err != nil {
 		return err
@@ -203,26 +193,32 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 		return fmt.Errorf("resolve current repository: %w", err)
 	}
 
-	fetchers := make(map[pollingBackend]reviewStatusFetcher, 2)
-	var rateLimits rateLimitFetcher
+	fetchers := make(map[pollingBackend]ghapiops.FetchFunc[reviewStatus], 2)
+	var rateLimits ghapiops.RateLimitFetcher
 	if polling.Backend != pollingBackendREST {
 		client, err := api.DefaultGraphQLClient()
 		if err != nil {
 			return fmt.Errorf("build GraphQL client: %w", err)
 		}
-		fetchers[pollingBackendGraphQL] = graphQLReviewStatusFetcher{client: client}
+		fetchers[pollingBackendGraphQL] = func(context.Context) (reviewStatus, ghapiops.Usage, error) {
+			status, err := fetchReviewStatusGraphQL(client, repo.Owner, repo.Name, target.Number)
+			return status, ghapiops.Usage{}, err
+		}
 	}
 	if polling.Backend != pollingBackendGraphQL {
 		client, err := api.DefaultRESTClient()
 		if err != nil {
 			return fmt.Errorf("build REST client: %w", err)
 		}
-		fetchers[pollingBackendREST] = restReviewStatusFetcher{client: client}
+		fetchers[pollingBackendREST] = func(context.Context) (reviewStatus, ghapiops.Usage, error) {
+			status, err := fetchReviewStatusREST(client, repo.Owner, repo.Name, target.Number)
+			return status, ghapiops.Usage{}, err
+		}
 		if polling.AutoAdjustWeights && (polling.Backend == pollingBackendAuto || polling.Backend == pollingBackendRandom) {
-			rateLimits = &cachedRateLimitFetcher{
-				fetcher:    restRateLimitFetcher{client: client},
-				minRefresh: time.Minute,
-				now:        time.Now,
+			rateLimits = &ghapiops.CachedRateLimitFetcher{
+				Fetcher:    restRateLimitFetcher{client: client},
+				MinRefresh: time.Minute,
+				Now:        time.Now,
 			}
 		}
 	}
@@ -236,7 +232,7 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 	for {
 		var snapshot *rateLimitSnapshot
 		if rateLimits != nil {
-			limits, err := rateLimits.Fetch()
+			limits, err := rateLimits.Fetch(ctx)
 			if err == nil {
 				snapshot = &limits
 			}
@@ -246,10 +242,11 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 		if err != nil {
 			return err
 		}
-		status, err := fetchReviewStatusWithFallback(order, fetchers, repo.Owner, repo.Name, target.Number)
+		result, err := ghapiops.FetchWithFallback(ctx, order, fetchers, isFallbackEligibleError)
 		if err != nil {
 			return err
 		}
+		status := result.Value
 
 		if status.CopilotRequested {
 			if async {
@@ -259,7 +256,15 @@ func pollReviewStatus(selector string, interval, timeout int, async bool, pollin
 			if !deadline.IsZero() && time.Now().Add(time.Duration(interval)*time.Second).After(deadline) {
 				return fmt.Errorf("timed out waiting for Copilot review on %s", target.URL)
 			}
-			time.Sleep(time.Duration(interval) * time.Second)
+			timer := time.NewTimer(time.Duration(interval) * time.Second)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 
@@ -295,29 +300,14 @@ func validatePollingFlags(interval, timeout int) error {
 }
 
 func validatePollingConfig(config pollingConfig) error {
-	switch config.Backend {
-	case pollingBackendAuto, pollingBackendRandom, pollingBackendGraphQL, pollingBackendREST:
-	default:
-		return fmt.Errorf("backend must be one of auto, random, rest, graphql: %q", config.Backend)
-	}
-	if config.RESTWeight < 0 {
-		return fmt.Errorf("rest-weight must be non-negative: %d", config.RESTWeight)
-	}
-	if config.GraphQLWeight < 0 {
-		return fmt.Errorf("graphql-weight must be non-negative: %d", config.GraphQLWeight)
-	}
-	if (config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom) &&
-		config.RESTWeight == 0 && config.GraphQLWeight == 0 {
-		return errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
-	}
-	return nil
+	return ghapiops.ValidateConfig(config)
 }
 
 func validatePollingConfigForCommand(cmd *cobra.Command, config pollingConfig) error {
 	if err := validatePollingConfig(config); err != nil {
 		return err
 	}
-	if config.Backend == pollingBackendAuto || config.Backend == pollingBackendRandom {
+	if config.IsAdaptive() {
 		return nil
 	}
 	var changedFlags []string
@@ -340,134 +330,7 @@ func validatePollingConfigForCommand(cmd *cobra.Command, config pollingConfig) e
 }
 
 func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, randomInt63n func(int64) int64) ([]pollingBackend, error) {
-	switch config.Backend {
-	case pollingBackendGraphQL:
-		return []pollingBackend{pollingBackendGraphQL}, nil
-	case pollingBackendREST:
-		return []pollingBackend{pollingBackendREST}, nil
-	case pollingBackendAuto:
-		primary := preferredAutoBackend(config, limits)
-		return pollingBackendOrder(primary), nil
-	case pollingBackendRandom:
-		restWeight, graphqlWeight := effectivePollingWeights(config, limits)
-		primary, err := chooseWeightedBackend(restWeight, graphqlWeight, randomInt63n)
-		if err != nil {
-			return nil, err
-		}
-		return pollingBackendOrder(primary), nil
-	default:
-		return nil, fmt.Errorf("unsupported polling backend: %q", config.Backend)
-	}
-}
-
-func preferredAutoBackend(config pollingConfig, limits *rateLimitSnapshot) pollingBackend {
-	restWeight, graphqlWeight := effectivePollingWeights(config, limits)
-	if graphqlWeight > restWeight {
-		return pollingBackendGraphQL
-	}
-	return pollingBackendREST
-}
-
-func effectivePollingWeights(config pollingConfig, limits *rateLimitSnapshot) (restWeight, graphqlWeight int64) {
-	restWeight = int64(config.RESTWeight)
-	graphqlWeight = int64(config.GraphQLWeight)
-	if !config.AutoAdjustWeights || limits == nil {
-		return restWeight, graphqlWeight
-	}
-
-	adjustedREST := restWeight
-	adjustedGraphQL := graphqlWeight
-	if adjustedREST > 0 {
-		// Pending REST polling short-circuits after requested_reviewers, so the common polling path stays at one request.
-		adjustedREST = scalePollingWeight(adjustedREST, max(limits.CoreRemaining, 0), restPollingRequestCost)
-	}
-	if adjustedGraphQL > 0 {
-		adjustedGraphQL = scalePollingWeight(adjustedGraphQL, max(limits.GraphQLRemaining, 0), graphQLPollingRequestCost)
-	}
-	if adjustedREST == 0 && adjustedGraphQL == 0 {
-		return restWeight, graphqlWeight
-	}
-	return adjustedREST, adjustedGraphQL
-}
-
-func scalePollingWeight(weight int64, remaining int, requestCost int64) int64 {
-	if weight <= 0 || remaining <= 0 {
-		return 0
-	}
-	scaled := saturatingMul(weight, int64(remaining))
-	if requestCost == 1 {
-		return scaled
-	}
-	return scaled / requestCost
-}
-
-func chooseWeightedBackend(restWeight, graphqlWeight int64, randomInt63n func(int64) int64) (pollingBackend, error) {
-	restWeight, graphqlWeight = normalizeWeightedPair(restWeight, graphqlWeight)
-	total := restWeight + graphqlWeight
-	if total <= 0 {
-		return "", errors.New("adaptive polling requires rest-weight or graphql-weight to be positive")
-	}
-	if randomInt63n(total) < restWeight {
-		return pollingBackendREST, nil
-	}
-	return pollingBackendGraphQL, nil
-}
-
-func saturatingMul(values ...int64) int64 {
-	result := int64(1)
-	for _, value := range values {
-		if value == 0 {
-			return 0
-		}
-		if result > maxInt64/value {
-			return maxInt64
-		}
-		result *= value
-	}
-	return result
-}
-
-func normalizeWeightedPair(left, right int64) (int64, int64) {
-	for left > maxInt64-right {
-		if left > 1 {
-			left = left/2 + left%2
-		}
-		if right > 1 {
-			right = right/2 + right%2
-		}
-	}
-	return left, right
-}
-
-func pollingBackendOrder(primary pollingBackend) []pollingBackend {
-	if primary == pollingBackendGraphQL {
-		return []pollingBackend{pollingBackendGraphQL, pollingBackendREST}
-	}
-	return []pollingBackend{pollingBackendREST, pollingBackendGraphQL}
-}
-
-type reviewStatusFetcher interface {
-	Fetch(owner, repo string, number int) (reviewStatus, error)
-}
-
-type graphQLReviewStatusFetcher struct {
-	client *api.GraphQLClient
-}
-
-func (f graphQLReviewStatusFetcher) Fetch(owner, repo string, number int) (reviewStatus, error) {
-	return fetchReviewStatusGraphQL(f.client, owner, repo, number)
-}
-
-type restReviewStatusFetcher struct {
-	client *api.RESTClient
-}
-
-func (f restReviewStatusFetcher) Fetch(owner, repo string, number int) (reviewStatus, error) {
-	return fetchReviewStatusREST(f.client, owner, repo, number)
-}
-
-type rateLimitFetcher interface {
-	Fetch() (rateLimitSnapshot, error)
+	return ghapiops.SelectBackends(config, limits, randomInt63n)
 }
 
 type restRequester interface {
@@ -478,38 +341,8 @@ type restRateLimitFetcher struct {
 	client *api.RESTClient
 }
 
-func (f restRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
+func (f restRateLimitFetcher) Fetch(context.Context) (rateLimitSnapshot, error) {
 	return fetchRateLimitSnapshot(f.client)
-}
-
-type cachedRateLimitFetcher struct {
-	fetcher    rateLimitFetcher
-	minRefresh time.Duration
-	now        func() time.Time
-
-	cached    rateLimitSnapshot
-	cachedAt  time.Time
-	hasCached bool
-}
-
-func (f *cachedRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
-	nowFunc := f.now
-	if nowFunc == nil {
-		nowFunc = time.Now
-	}
-	now := nowFunc()
-	if f.hasCached && now.Sub(f.cachedAt) < f.minRefresh {
-		return f.cached, nil
-	}
-
-	snapshot, err := f.fetcher.Fetch()
-	if err != nil {
-		return rateLimitSnapshot{}, err
-	}
-	f.cached = snapshot
-	f.cachedAt = now
-	f.hasCached = true
-	return snapshot, nil
 }
 
 func getRESTJSON(client restRequester, path string, response interface{}) (http.Header, error) {
@@ -529,31 +362,6 @@ func getRESTJSON(client restRequester, path string, response interface{}) (http.
 		return nil, fmt.Errorf("decode REST response for %s: %w", path, err)
 	}
 	return resp.Header.Clone(), nil
-}
-
-func fetchReviewStatusWithFallback(order []pollingBackend, fetchers map[pollingBackend]reviewStatusFetcher, owner, repo string, number int) (reviewStatus, error) {
-	var errs []error
-	for index, backend := range order {
-		fetcher, ok := fetchers[backend]
-		if !ok {
-			return reviewStatus{}, fmt.Errorf("polling backend unavailable: %s", backend)
-		}
-
-		status, err := fetcher.Fetch(owner, repo, number)
-		if err == nil {
-			return status, nil
-		}
-
-		wrappedErr := fmt.Errorf("%s backend: %w", backend, err)
-		if index == len(order)-1 || len(order) == 1 || !isFallbackEligibleError(err) {
-			if len(errs) == 0 {
-				return reviewStatus{}, wrappedErr
-			}
-			return reviewStatus{}, errors.Join(append(errs, wrappedErr)...)
-		}
-		errs = append(errs, wrappedErr)
-	}
-	return reviewStatus{}, errors.New("no polling backend selected")
 }
 
 func isFallbackEligibleError(err error) bool {
@@ -1011,11 +819,6 @@ func requestTargetString(target *url.URL) string {
 		return target.String()
 	}
 	return strings.TrimPrefix(target.RequestURI(), "/")
-}
-
-type rateLimitSnapshot struct {
-	CoreRemaining    int
-	GraphQLRemaining int
 }
 
 type rateLimitResponse struct {

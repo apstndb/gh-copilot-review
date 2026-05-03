@@ -108,20 +108,6 @@ func TestValidatePollingConfigForCommand(t *testing.T) {
 	}
 }
 
-func TestScalePollingWeight(t *testing.T) {
-	t.Parallel()
-
-	if got := scalePollingWeight(3, 10, 2); got != 15 {
-		t.Fatalf("scalePollingWeight() = %d, want 15", got)
-	}
-	if got := scalePollingWeight(3, 10, 1); got != 30 {
-		t.Fatalf("scalePollingWeight() with unit cost = %d, want 30", got)
-	}
-	if got := scalePollingWeight(3, 10, 3); got != 10 {
-		t.Fatalf("scalePollingWeight() with non-unit cost = %d, want 10", got)
-	}
-}
-
 func TestSelectPollingBackends(t *testing.T) {
 	t.Parallel()
 
@@ -515,96 +501,6 @@ func TestFetchReviewStatusRESTEscapesOwnerAndRepo(t *testing.T) {
 	}
 }
 
-func TestChooseWeightedBackendHandlesLargeWeights(t *testing.T) {
-	t.Parallel()
-
-	backend, err := chooseWeightedBackend(maxInt64, maxInt64, func(total int64) int64 { return total - 1 })
-	if err != nil {
-		t.Fatalf("chooseWeightedBackend() error = %v", err)
-	}
-	if backend != pollingBackendGraphQL {
-		t.Fatalf("chooseWeightedBackend() = %q, want graphql", backend)
-	}
-}
-
-func TestFetchReviewStatusWithFallback(t *testing.T) {
-	t.Parallel()
-
-	t.Run("falls back on rate limit", func(t *testing.T) {
-		t.Parallel()
-
-		rest := &stubReviewStatusFetcher{
-			err: &api.HTTPError{StatusCode: 403, Message: "API rate limit exceeded"},
-		}
-		graphql := &stubReviewStatusFetcher{
-			status: reviewStatus{CopilotRequested: true},
-		}
-
-		status, err := fetchReviewStatusWithFallback(
-			[]pollingBackend{pollingBackendREST, pollingBackendGraphQL},
-			map[pollingBackend]reviewStatusFetcher{
-				pollingBackendREST:    rest,
-				pollingBackendGraphQL: graphql,
-			},
-			"apstndb",
-			"gh-copilot-review",
-			2,
-		)
-		if err != nil {
-			t.Fatalf("fetchReviewStatusWithFallback() error = %v", err)
-		}
-		if !status.CopilotRequested {
-			t.Fatal("fetchReviewStatusWithFallback() did not return fallback status")
-		}
-		if rest.calls != 1 || graphql.calls != 1 {
-			t.Fatalf("fetchReviewStatusWithFallback() calls = rest:%d graphql:%d, want 1/1", rest.calls, graphql.calls)
-		}
-	})
-
-	t.Run("does not fall back on non-retryable errors", func(t *testing.T) {
-		t.Parallel()
-
-		rest := &stubReviewStatusFetcher{
-			err: &api.HTTPError{StatusCode: 404, Message: "Not Found"},
-		}
-		graphql := &stubReviewStatusFetcher{
-			status: reviewStatus{CopilotRequested: true},
-		}
-
-		_, err := fetchReviewStatusWithFallback(
-			[]pollingBackend{pollingBackendREST, pollingBackendGraphQL},
-			map[pollingBackend]reviewStatusFetcher{
-				pollingBackendREST:    rest,
-				pollingBackendGraphQL: graphql,
-			},
-			"apstndb",
-			"gh-copilot-review",
-			2,
-		)
-		if err == nil {
-			t.Fatal("fetchReviewStatusWithFallback() error = nil, want non-retryable error")
-		}
-		if !containsAny(err.Error(), "rest backend") {
-			t.Fatalf("fetchReviewStatusWithFallback() error = %v, want backend context", err)
-		}
-		if graphql.calls != 0 {
-			t.Fatalf("fetchReviewStatusWithFallback() graphql calls = %d, want 0", graphql.calls)
-		}
-	})
-
-	t.Run("errors when no backend is selected", func(t *testing.T) {
-		t.Parallel()
-
-		_, err := fetchReviewStatusWithFallback(nil, nil, "apstndb", "gh-copilot-review", 2)
-		if err == nil {
-			t.Fatal("fetchReviewStatusWithFallback() error = nil, want empty-order error")
-		}
-		if err.Error() != "no polling backend selected" {
-			t.Fatalf("fetchReviewStatusWithFallback() error = %v, want no polling backend selected", err)
-		}
-	})
-}
-
 func TestIsFallbackEligibleError(t *testing.T) {
 	t.Parallel()
 
@@ -613,60 +509,6 @@ func TestIsFallbackEligibleError(t *testing.T) {
 	}
 	if isFallbackEligibleError(errors.New("plain error")) {
 		t.Fatal("isFallbackEligibleError() = true for plain error")
-	}
-}
-
-func TestCachedRateLimitFetcher(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
-	nowCalls := 0
-	source := &stubRateLimitFetcher{
-		snapshots: []rateLimitSnapshot{
-			{CoreRemaining: 10, GraphQLRemaining: 20},
-			{CoreRemaining: 5, GraphQLRemaining: 15},
-		},
-	}
-	cache := &cachedRateLimitFetcher{
-		fetcher:    source,
-		minRefresh: time.Minute,
-		now: func() time.Time {
-			nowCalls++
-			return now
-		},
-	}
-
-	first, err := cache.Fetch()
-	if err != nil {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() error = %v", err)
-	}
-	second, err := cache.Fetch()
-	if err != nil {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() second error = %v", err)
-	}
-	if first != second {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() second = %#v, want %#v", second, first)
-	}
-	if source.calls != 1 {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 1", source.calls)
-	}
-	if nowCalls != 2 {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() now calls after two fetches = %d, want 2", nowCalls)
-	}
-
-	now = now.Add(2 * time.Minute)
-	third, err := cache.Fetch()
-	if err != nil {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() third error = %v", err)
-	}
-	if third.CoreRemaining != 5 || third.GraphQLRemaining != 15 {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() third = %#v, want refreshed snapshot", third)
-	}
-	if source.calls != 2 {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() source calls = %d, want 2", source.calls)
-	}
-	if nowCalls != 3 {
-		t.Fatalf("cachedRateLimitFetcher.Fetch() total now calls = %d, want 3", nowCalls)
 	}
 }
 
@@ -739,20 +581,6 @@ func TestLastPagePath(t *testing.T) {
 	})
 }
 
-type stubReviewStatusFetcher struct {
-	status reviewStatus
-	err    error
-	calls  int
-}
-
-func (f *stubReviewStatusFetcher) Fetch(string, string, int) (reviewStatus, error) {
-	f.calls++
-	if f.err != nil {
-		return reviewStatus{}, f.err
-	}
-	return f.status, nil
-}
-
 type stubRESTResponse struct {
 	body    interface{}
 	headers http.Header
@@ -823,18 +651,4 @@ func (g *stubRESTGetter) requestCount(path string) int {
 		}
 	}
 	return count
-}
-
-type stubRateLimitFetcher struct {
-	snapshots []rateLimitSnapshot
-	calls     int
-}
-
-func (f *stubRateLimitFetcher) Fetch() (rateLimitSnapshot, error) {
-	if f.calls >= len(f.snapshots) {
-		return rateLimitSnapshot{}, errors.New("no snapshot")
-	}
-	snapshot := f.snapshots[f.calls]
-	f.calls++
-	return snapshot, nil
 }
