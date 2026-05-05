@@ -73,6 +73,33 @@ func TestFetchWithFallback(t *testing.T) {
 		}
 	})
 
+	t.Run("joins prior errors when fallback backend is unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		rest := &stubFetchFunc[bool]{
+			err:   errors.New("rate limit"),
+			usage: Usage{RESTRequests: 1},
+		}
+
+		result, err := FetchWithFallback(
+			context.Background(),
+			[]Backend{BackendREST, BackendGraphQL},
+			map[Backend]FetchFunc[bool]{
+				BackendREST: rest.Fetch,
+			},
+			func(err error) bool { return err.Error() == "rate limit" },
+		)
+		if err == nil {
+			t.Fatal("FetchWithFallback() error = nil, want joined error")
+		}
+		if !containsAny(err.Error(), "rest backend: rate limit", "backend unavailable: graphql") {
+			t.Fatalf("FetchWithFallback() error = %v, want both backend errors", err)
+		}
+		if result.Usage.RESTRequests != 1 {
+			t.Fatalf("FetchWithFallback() usage = %#v, want usage from attempted backend", result.Usage)
+		}
+	})
+
 	t.Run("stops immediately when context is already canceled", func(t *testing.T) {
 		t.Parallel()
 
