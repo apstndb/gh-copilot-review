@@ -27,21 +27,29 @@ type CachedRateLimitFetcher struct {
 }
 
 func (f *CachedRateLimitFetcher) Fetch(ctx context.Context) (RateLimitSnapshot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	nowFunc := f.Now
 	if nowFunc == nil {
 		nowFunc = time.Now
 	}
 	now := nowFunc()
+
+	f.mu.Lock()
 	if f.hasCached && now.Sub(f.cachedAt) < f.MinRefresh {
-		return f.cached, nil
+		cached := f.cached
+		f.mu.Unlock()
+		return cached, nil
 	}
+	f.mu.Unlock()
 
 	snapshot, err := f.Fetcher.Fetch(ctx)
 	if err != nil {
 		return RateLimitSnapshot{}, err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hasCached && now.Sub(f.cachedAt) < f.MinRefresh {
+		return f.cached, nil
 	}
 	f.cached = snapshot
 	f.cachedAt = now

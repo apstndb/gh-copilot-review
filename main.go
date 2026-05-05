@@ -205,8 +205,11 @@ func pollReviewStatus(ctx context.Context, selector string, interval, timeout in
 		if err != nil {
 			return fmt.Errorf("build GraphQL client: %w", err)
 		}
-		fetchers[pollingBackendGraphQL] = func(context.Context) (reviewStatus, ghapiops.Usage, error) {
-			status, err := fetchReviewStatusGraphQL(client, repo.Owner, repo.Name, target.Number)
+		fetchers[pollingBackendGraphQL] = func(ctx context.Context) (reviewStatus, ghapiops.Usage, error) {
+			if err := ctx.Err(); err != nil {
+				return reviewStatus{}, ghapiops.Usage{}, err
+			}
+			status, err := fetchReviewStatusGraphQL(ctx, client, repo.Owner, repo.Name, target.Number)
 			return status, ghapiops.Usage{}, err
 		}
 	}
@@ -215,8 +218,11 @@ func pollReviewStatus(ctx context.Context, selector string, interval, timeout in
 		if err != nil {
 			return fmt.Errorf("build REST client: %w", err)
 		}
-		fetchers[pollingBackendREST] = func(context.Context) (reviewStatus, ghapiops.Usage, error) {
-			status, err := fetchReviewStatusREST(client, repo.Owner, repo.Name, target.Number)
+		fetchers[pollingBackendREST] = func(ctx context.Context) (reviewStatus, ghapiops.Usage, error) {
+			if err := ctx.Err(); err != nil {
+				return reviewStatus{}, ghapiops.Usage{}, err
+			}
+			status, err := fetchReviewStatusREST(ctx, client, repo.Owner, repo.Name, target.Number)
 			return status, ghapiops.Usage{}, err
 		}
 		if polling.AutoAdjustWeights && (polling.Backend == pollingBackendAuto || polling.Backend == pollingBackendRandom) {
@@ -339,19 +345,22 @@ func selectPollingBackends(config pollingConfig, limits *rateLimitSnapshot, rand
 }
 
 type restRequester interface {
-	Request(method string, path string, body io.Reader) (*http.Response, error)
+	RequestWithContext(context.Context, string, string, io.Reader) (*http.Response, error)
 }
 
 type restRateLimitFetcher struct {
 	client *api.RESTClient
 }
 
-func (f restRateLimitFetcher) Fetch(context.Context) (rateLimitSnapshot, error) {
-	return fetchRateLimitSnapshot(f.client)
+func (f restRateLimitFetcher) Fetch(ctx context.Context) (rateLimitSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return rateLimitSnapshot{}, err
+	}
+	return fetchRateLimitSnapshot(ctx, f.client)
 }
 
-func getRESTJSON(client restRequester, path string, response interface{}) (http.Header, error) {
-	resp, err := client.Request("GET", path, nil)
+func getRESTJSON(ctx context.Context, client restRequester, path string, response interface{}) (http.Header, error) {
+	resp, err := client.RequestWithContext(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +485,7 @@ type reviewStatusResponse struct {
 	} `json:"repository"`
 }
 
-func fetchReviewStatusGraphQL(client *api.GraphQLClient, owner, repo string, number int) (reviewStatus, error) {
+func fetchReviewStatusGraphQL(ctx context.Context, client *api.GraphQLClient, owner, repo string, number int) (reviewStatus, error) {
 	const query = `
 	query($owner:String!, $repo:String!, $number:Int!) {
 	  repository(owner:$owner, name:$repo) {
@@ -507,7 +516,7 @@ func fetchReviewStatusGraphQL(client *api.GraphQLClient, owner, repo string, num
 		"repo":   repo,
 		"number": number,
 	}
-	if err := client.Do(query, vars, &resp); err != nil {
+	if err := client.DoWithContext(ctx, query, vars, &resp); err != nil {
 		return reviewStatus{}, fmt.Errorf("query review status: %w", err)
 	}
 
@@ -557,13 +566,13 @@ type pullRequestReview struct {
 	CommitID    string                `json:"commit_id"`
 }
 
-func fetchReviewStatusREST(client *api.RESTClient, owner, repo string, number int) (reviewStatus, error) {
-	return fetchReviewStatusRESTWithRequester(client, owner, repo, number)
+func fetchReviewStatusREST(ctx context.Context, client *api.RESTClient, owner, repo string, number int) (reviewStatus, error) {
+	return fetchReviewStatusRESTWithRequester(ctx, client, owner, repo, number)
 }
 
-func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string, number int) (reviewStatus, error) {
+func fetchReviewStatusRESTWithRequester(ctx context.Context, client restRequester, owner, repo string, number int) (reviewStatus, error) {
 	var requestedReviewers requestedReviewersResponse
-	if _, err := getRESTJSON(client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", url.PathEscape(owner), url.PathEscape(repo), number), &requestedReviewers); err != nil {
+	if _, err := getRESTJSON(ctx, client, fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", url.PathEscape(owner), url.PathEscape(repo), number), &requestedReviewers); err != nil {
 		return reviewStatus{}, fmt.Errorf("query requested reviewers: %w", err)
 	}
 	status := buildReviewStatusFromREST(requestedReviewers, nil)
@@ -572,7 +581,7 @@ func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string
 		return status, nil
 	}
 
-	reviews, err := fetchPullRequestReviewsREST(client, owner, repo, number)
+	reviews, err := fetchPullRequestReviewsREST(ctx, client, owner, repo, number)
 	if err != nil {
 		return reviewStatus{}, err
 	}
@@ -580,13 +589,13 @@ func fetchReviewStatusRESTWithRequester(client restRequester, owner, repo string
 	return buildReviewStatusFromREST(requestedReviewers, reviews), nil
 }
 
-func fetchPullRequestReviewsREST(client restRequester, owner, repo string, number int) ([]pullRequestReview, error) {
+func fetchPullRequestReviewsREST(ctx context.Context, client restRequester, owner, repo string, number int) ([]pullRequestReview, error) {
 	owner = url.PathEscape(owner)
 	repo = url.PathEscape(repo)
 
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=%d", owner, repo, number, pullRequestReviewsPerPage)
 	var firstPageReviews []pullRequestReview
-	headers, err := getRESTJSON(client, path, &firstPageReviews)
+	headers, err := getRESTJSON(ctx, client, path, &firstPageReviews)
 	if err != nil {
 		return nil, fmt.Errorf("query pull request reviews: %w", err)
 	}
@@ -600,7 +609,7 @@ func fetchPullRequestReviewsREST(client restRequester, owner, repo string, numbe
 	}
 
 	var latestPage []pullRequestReview
-	if _, err := getRESTJSON(client, lastPath, &latestPage); err != nil {
+	if _, err := getRESTJSON(ctx, client, lastPath, &latestPage); err != nil {
 		return nil, fmt.Errorf("query last pull request review page: %w", err)
 	}
 	if containsCopilotReview(latestPage) {
@@ -620,7 +629,7 @@ func fetchPullRequestReviewsREST(client restRequester, owner, repo string, numbe
 		}
 
 		var currentPage []pullRequestReview
-		if _, err := getRESTJSON(client, currentPath, &currentPage); err != nil {
+		if _, err := getRESTJSON(ctx, client, currentPath, &currentPage); err != nil {
 			return nil, fmt.Errorf("query pull request review page %d: %w", page, err)
 		}
 		if containsCopilotReview(currentPage) {
@@ -837,9 +846,9 @@ type rateLimitResponse struct {
 	} `json:"resources"`
 }
 
-func fetchRateLimitSnapshot(client restRequester) (rateLimitSnapshot, error) {
+func fetchRateLimitSnapshot(ctx context.Context, client restRequester) (rateLimitSnapshot, error) {
 	var resp rateLimitResponse
-	if _, err := getRESTJSON(client, "rate_limit", &resp); err != nil {
+	if _, err := getRESTJSON(ctx, client, "rate_limit", &resp); err != nil {
 		return rateLimitSnapshot{}, fmt.Errorf("query rate limits: %w", err)
 	}
 	return rateLimitSnapshot{

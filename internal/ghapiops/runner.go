@@ -42,7 +42,7 @@ func FetchWithFallback[T any](ctx context.Context, order []Backend, fetchers map
 
 		fetcher, ok := fetchers[backend]
 		if !ok {
-			return Result[T]{}, fmt.Errorf("backend unavailable: %s", backend)
+			return Result[T]{Usage: totalUsage}, fmt.Errorf("backend unavailable: %s", backend)
 		}
 
 		value, usage, err := fetcher(ctx)

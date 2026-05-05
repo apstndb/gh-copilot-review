@@ -73,14 +73,14 @@ func TestValidateConfig(t *testing.T) {
 func TestScaleWeight(t *testing.T) {
 	t.Parallel()
 
-	if got := scaleWeight(3, 10, 2); got != 15 {
-		t.Fatalf("scaleWeight() = %d, want 15", got)
+	if got := scaleWeight(3, 10); got != 30 {
+		t.Fatalf("scaleWeight() = %d, want 30", got)
 	}
-	if got := scaleWeight(3, 10, 1); got != 30 {
-		t.Fatalf("scaleWeight() with unit cost = %d, want 30", got)
+	if got := scaleWeight(3, 0); got != 0 {
+		t.Fatalf("scaleWeight() with empty budget = %d, want 0", got)
 	}
-	if got := scaleWeight(3, 10, 3); got != 10 {
-		t.Fatalf("scaleWeight() with non-unit cost = %d, want 10", got)
+	if got := scaleWeight(0, 10); got != 0 {
+		t.Fatalf("scaleWeight() with zero weight = %d, want 0", got)
 	}
 }
 

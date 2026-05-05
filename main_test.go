@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -283,7 +284,7 @@ func TestFetchPullRequestReviewsREST(t *testing.T) {
 		},
 	}
 
-	reviews, err := fetchPullRequestReviewsREST(client, "apstndb", "gh-copilot-review", 3)
+	reviews, err := fetchPullRequestReviewsREST(context.Background(), client, "apstndb", "gh-copilot-review", 3)
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
@@ -342,7 +343,7 @@ func TestFetchPullRequestReviewsRESTScansBackwardPages(t *testing.T) {
 		},
 	}
 
-	reviews, err := fetchPullRequestReviewsREST(client, "apstndb", "gh-copilot-review", 3)
+	reviews, err := fetchPullRequestReviewsREST(context.Background(), client, "apstndb", "gh-copilot-review", 3)
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
@@ -404,7 +405,7 @@ func TestFetchPullRequestReviewsRESTPreservesEnterprisePaginationURL(t *testing.
 		},
 	}
 
-	reviews, err := fetchPullRequestReviewsREST(client, "apstndb", "gh-copilot-review", 3)
+	reviews, err := fetchPullRequestReviewsREST(context.Background(), client, "apstndb", "gh-copilot-review", 3)
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
@@ -436,7 +437,7 @@ func TestFetchPullRequestReviewsRESTEscapesOwnerAndRepo(t *testing.T) {
 		},
 	}
 
-	reviews, err := fetchPullRequestReviewsREST(client, "octo corp", "repo name", 3)
+	reviews, err := fetchPullRequestReviewsREST(context.Background(), client, "octo corp", "repo name", 3)
 	if err != nil {
 		t.Fatalf("fetchPullRequestReviewsREST() error = %v", err)
 	}
@@ -461,7 +462,7 @@ func TestFetchReviewStatusRESTSkipsReviewsWhilePending(t *testing.T) {
 		},
 	}
 
-	status, err := fetchReviewStatusRESTWithRequester(client, "apstndb", "gh-copilot-review", 3)
+	status, err := fetchReviewStatusRESTWithRequester(context.Background(), client, "apstndb", "gh-copilot-review", 3)
 	if err != nil {
 		t.Fatalf("fetchReviewStatusREST() error = %v", err)
 	}
@@ -490,7 +491,7 @@ func TestFetchReviewStatusRESTEscapesOwnerAndRepo(t *testing.T) {
 		},
 	}
 
-	if _, err := fetchReviewStatusRESTWithRequester(client, "octo corp", "repo name", 3); err != nil {
+	if _, err := fetchReviewStatusRESTWithRequester(context.Background(), client, "octo corp", "repo name", 3); err != nil {
 		t.Fatalf("fetchReviewStatusRESTWithRequester() error = %v", err)
 	}
 	if client.requestCount("repos/octo%20corp/repo%20name/pulls/3/requested_reviewers") != 1 {
@@ -593,7 +594,10 @@ type stubRESTGetter struct {
 	requests  []string
 }
 
-func (g *stubRESTGetter) Request(method, path string, body io.Reader) (*http.Response, error) {
+func (g *stubRESTGetter) RequestWithContext(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	g.requests = append(g.requests, path)
 	response, ok := g.responses[path]
 	if !ok {
@@ -630,7 +634,7 @@ func TestGetRESTJSONRejectsEmptyBody(t *testing.T) {
 	}
 
 	var response []pullRequestReview
-	_, err := getRESTJSON(client, "repos/apstndb/gh-copilot-review/pulls/3/reviews", &response)
+	_, err := getRESTJSON(context.Background(), client, "repos/apstndb/gh-copilot-review/pulls/3/reviews", &response)
 	if err == nil {
 		t.Fatal("getRESTJSON() error = nil, want empty response body error")
 	}

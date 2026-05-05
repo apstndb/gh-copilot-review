@@ -98,10 +98,10 @@ func effectiveWeights(config Config, limits *RateLimitSnapshot) (restWeight, gra
 	adjustedREST := restWeight
 	adjustedGraphQL := graphqlWeight
 	if adjustedREST > 0 {
-		adjustedREST = scaleWeight(adjustedREST, max(limits.CoreRemaining, 0), 1)
+		adjustedREST = scaleWeight(adjustedREST, max(limits.CoreRemaining, 0))
 	}
 	if adjustedGraphQL > 0 {
-		adjustedGraphQL = scaleWeight(adjustedGraphQL, max(limits.GraphQLRemaining, 0), 1)
+		adjustedGraphQL = scaleWeight(adjustedGraphQL, max(limits.GraphQLRemaining, 0))
 	}
 	if adjustedREST == 0 && adjustedGraphQL == 0 {
 		return restWeight, graphqlWeight
@@ -109,15 +109,11 @@ func effectiveWeights(config Config, limits *RateLimitSnapshot) (restWeight, gra
 	return adjustedREST, adjustedGraphQL
 }
 
-func scaleWeight(weight int64, remaining int, requestCost int64) int64 {
+func scaleWeight(weight int64, remaining int) int64 {
 	if weight <= 0 || remaining <= 0 {
 		return 0
 	}
-	scaled := saturatingMul(weight, int64(remaining))
-	if requestCost == 1 {
-		return scaled
-	}
-	return scaled / requestCost
+	return saturatingMul(weight, int64(remaining))
 }
 
 func chooseWeightedBackend(restWeight, graphqlWeight int64, randomInt63n func(int64) int64) (Backend, error) {
