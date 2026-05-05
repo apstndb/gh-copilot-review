@@ -33,6 +33,10 @@ type FetchFunc[T any] func(context.Context) (T, Usage, error)
 type FallbackPredicate func(error) bool
 
 func FetchWithFallback[T any](ctx context.Context, order []Backend, fetchers map[Backend]FetchFunc[T], canFallback FallbackPredicate) (Result[T], error) {
+	if len(order) == 0 {
+		return Result[T]{}, errors.New("no backend selected")
+	}
+
 	var errs []error
 	var totalUsage Usage
 	for index, backend := range order {
