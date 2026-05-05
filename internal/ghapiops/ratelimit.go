@@ -2,6 +2,7 @@ package ghapiops
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -27,6 +28,10 @@ type CachedRateLimitFetcher struct {
 }
 
 func (f *CachedRateLimitFetcher) Fetch(ctx context.Context) (RateLimitSnapshot, error) {
+	if f.Fetcher == nil {
+		return RateLimitSnapshot{}, errors.New("cached rate limit fetcher requires a fetcher")
+	}
+
 	nowFunc := f.Now
 	if nowFunc == nil {
 		nowFunc = time.Now

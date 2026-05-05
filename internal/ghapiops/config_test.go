@@ -262,3 +262,16 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 		t.Fatalf("CachedRateLimitFetcher.Fetch() total now calls = %d, want 3", nowCalls)
 	}
 }
+
+func TestCachedRateLimitFetcherRejectsNilFetcher(t *testing.T) {
+	t.Parallel()
+
+	cache := &CachedRateLimitFetcher{}
+	_, err := cache.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("CachedRateLimitFetcher.Fetch() error = nil, want missing fetcher error")
+	}
+	if !containsAny(err.Error(), "requires a fetcher") {
+		t.Fatalf("CachedRateLimitFetcher.Fetch() error = %v, want missing fetcher context", err)
+	}
+}
