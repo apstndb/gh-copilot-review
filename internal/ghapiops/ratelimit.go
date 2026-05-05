@@ -2,6 +2,7 @@ package ghapiops
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -19,12 +20,16 @@ type CachedRateLimitFetcher struct {
 	MinRefresh time.Duration
 	Now        func() time.Time
 
+	mu        sync.Mutex
 	cached    RateLimitSnapshot
 	cachedAt  time.Time
 	hasCached bool
 }
 
 func (f *CachedRateLimitFetcher) Fetch(ctx context.Context) (RateLimitSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	nowFunc := f.Now
 	if nowFunc == nil {
 		nowFunc = time.Now

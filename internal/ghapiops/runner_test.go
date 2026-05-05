@@ -12,8 +12,14 @@ func TestFetchWithFallback(t *testing.T) {
 	t.Run("falls back on eligible errors", func(t *testing.T) {
 		t.Parallel()
 
-		rest := &stubFetchFunc[bool]{err: errors.New("rate limit")}
-		graphql := &stubFetchFunc[bool]{value: true}
+		rest := &stubFetchFunc[bool]{
+			err:   errors.New("rate limit"),
+			usage: Usage{RESTRequests: 1},
+		}
+		graphql := &stubFetchFunc[bool]{
+			value: true,
+			usage: Usage{GraphQLRequests: 1, GraphQLCost: 2},
+		}
 
 		result, err := FetchWithFallback(
 			context.Background(),
@@ -32,6 +38,9 @@ func TestFetchWithFallback(t *testing.T) {
 		}
 		if result.Backend != BackendGraphQL {
 			t.Fatalf("FetchWithFallback() backend = %q, want graphql", result.Backend)
+		}
+		if result.Usage.RESTRequests != 1 || result.Usage.GraphQLRequests != 1 || result.Usage.GraphQLCost != 2 {
+			t.Fatalf("FetchWithFallback() usage = %#v, want aggregated usage", result.Usage)
 		}
 		if rest.calls != 1 || graphql.calls != 1 {
 			t.Fatalf("FetchWithFallback() calls = rest:%d graphql:%d, want 1/1", rest.calls, graphql.calls)
@@ -64,6 +73,35 @@ func TestFetchWithFallback(t *testing.T) {
 		}
 	})
 
+	t.Run("stops immediately when context is already canceled", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		rest := &stubFetchFunc[bool]{value: true}
+		graphql := &stubFetchFunc[bool]{value: true}
+
+		_, err := FetchWithFallback(
+			ctx,
+			[]Backend{BackendREST, BackendGraphQL},
+			map[Backend]FetchFunc[bool]{
+				BackendREST:    rest.Fetch,
+				BackendGraphQL: graphql.Fetch,
+			},
+			func(error) bool { return true },
+		)
+		if err == nil {
+			t.Fatal("FetchWithFallback() error = nil, want canceled context")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchWithFallback() error = %v, want context.Canceled", err)
+		}
+		if rest.calls != 0 || graphql.calls != 0 {
+			t.Fatalf("FetchWithFallback() calls = rest:%d graphql:%d, want 0/0", rest.calls, graphql.calls)
+		}
+	})
+
 	t.Run("errors when no backend is selected", func(t *testing.T) {
 		t.Parallel()
 
@@ -88,7 +126,7 @@ func (f *stubFetchFunc[T]) Fetch(context.Context) (T, Usage, error) {
 	f.calls++
 	if f.err != nil {
 		var zero T
-		return zero, Usage{}, f.err
+		return zero, f.usage, f.err
 	}
 	return f.value, f.usage, nil
 }

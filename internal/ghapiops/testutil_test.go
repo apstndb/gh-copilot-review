@@ -3,6 +3,7 @@ package ghapiops
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 type stubRateLimitFetcher struct {
@@ -17,4 +18,13 @@ func (f *stubRateLimitFetcher) Fetch(context.Context) (RateLimitSnapshot, error)
 	snapshot := f.snapshots[f.calls]
 	f.calls++
 	return snapshot, nil
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }

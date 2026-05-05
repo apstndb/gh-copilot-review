@@ -66,6 +66,9 @@ func SelectBackends(config Config, limits *RateLimitSnapshot, randomInt63n func(
 		primary := preferredAutoBackend(config, limits)
 		return backendOrder(primary), nil
 	case BackendRandom:
+		if randomInt63n == nil {
+			return nil, errors.New("random backend requires a randomInt63n function")
+		}
 		restWeight, graphqlWeight := effectiveWeights(config, limits)
 		primary, err := chooseWeightedBackend(restWeight, graphqlWeight, randomInt63n)
 		if err != nil {

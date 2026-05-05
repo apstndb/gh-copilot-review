@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	gh "github.com/cli/go-gh/v2"
@@ -43,7 +45,10 @@ type pollingConfig = ghapiops.Config
 type rateLimitSnapshot = ghapiops.RateLimitSnapshot
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		var pendingErr pendingReviewError
 		if errors.As(err, &pendingErr) {
 			fmt.Fprintln(os.Stderr, pendingErr.Error())

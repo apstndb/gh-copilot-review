@@ -2,7 +2,6 @@ package ghapiops
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 )
@@ -194,6 +193,22 @@ func TestChooseWeightedBackendHandlesLargeWeights(t *testing.T) {
 	}
 }
 
+func TestSelectBackendsRejectsNilRandomFunc(t *testing.T) {
+	t.Parallel()
+
+	_, err := SelectBackends(Config{
+		Backend:       BackendRandom,
+		RESTWeight:    1,
+		GraphQLWeight: 1,
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("SelectBackends() error = nil, want nil-random function error")
+	}
+	if !containsAny(err.Error(), "randomInt63n") {
+		t.Fatalf("SelectBackends() error = %v, want randomInt63n context", err)
+	}
+}
+
 func TestCachedRateLimitFetcher(t *testing.T) {
 	t.Parallel()
 
@@ -246,13 +261,4 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	if nowCalls != 3 {
 		t.Fatalf("CachedRateLimitFetcher.Fetch() total now calls = %d, want 3", nowCalls)
 	}
-}
-
-func containsAny(value string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(value, needle) {
-			return true
-		}
-	}
-	return false
 }
