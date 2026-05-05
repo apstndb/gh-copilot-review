@@ -243,8 +243,8 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	if source.calls != 1 {
 		t.Fatalf("CachedRateLimitFetcher.Fetch() source calls = %d, want 1", source.calls)
 	}
-	if nowCalls != 2 {
-		t.Fatalf("CachedRateLimitFetcher.Fetch() now calls after two fetches = %d, want 2", nowCalls)
+	if nowCalls != 3 {
+		t.Fatalf("CachedRateLimitFetcher.Fetch() now calls after two fetches = %d, want 3", nowCalls)
 	}
 
 	now = now.Add(2 * time.Minute)
@@ -258,8 +258,8 @@ func TestCachedRateLimitFetcher(t *testing.T) {
 	if source.calls != 2 {
 		t.Fatalf("CachedRateLimitFetcher.Fetch() source calls = %d, want 2", source.calls)
 	}
-	if nowCalls != 3 {
-		t.Fatalf("CachedRateLimitFetcher.Fetch() total now calls = %d, want 3", nowCalls)
+	if nowCalls != 5 {
+		t.Fatalf("CachedRateLimitFetcher.Fetch() total now calls = %d, want 5", nowCalls)
 	}
 }
 

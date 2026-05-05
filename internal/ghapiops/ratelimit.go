@@ -50,14 +50,15 @@ func (f *CachedRateLimitFetcher) Fetch(ctx context.Context) (RateLimitSnapshot, 
 	if err != nil {
 		return RateLimitSnapshot{}, err
 	}
+	refreshedAt := nowFunc()
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.hasCached && now.Sub(f.cachedAt) < f.MinRefresh {
+	if f.hasCached && refreshedAt.Sub(f.cachedAt) < f.MinRefresh {
 		return f.cached, nil
 	}
 	f.cached = snapshot
-	f.cachedAt = now
+	f.cachedAt = refreshedAt
 	f.hasCached = true
 	return snapshot, nil
 }
