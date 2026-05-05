@@ -16,6 +16,9 @@ type RateLimitFetcher interface {
 	Fetch(context.Context) (RateLimitSnapshot, error)
 }
 
+// CachedRateLimitFetcher protects cached state from concurrent access.
+// When the cache is stale, concurrent callers may still trigger duplicate refreshes;
+// that tradeoff keeps this phase-1 helper dependency-free until shared-module needs are proven.
 type CachedRateLimitFetcher struct {
 	Fetcher    RateLimitFetcher
 	MinRefresh time.Duration

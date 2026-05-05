@@ -206,9 +206,6 @@ func pollReviewStatus(ctx context.Context, selector string, interval, timeout in
 			return fmt.Errorf("build GraphQL client: %w", err)
 		}
 		fetchers[pollingBackendGraphQL] = func(ctx context.Context) (reviewStatus, ghapiops.Usage, error) {
-			if err := ctx.Err(); err != nil {
-				return reviewStatus{}, ghapiops.Usage{}, err
-			}
 			status, err := fetchReviewStatusGraphQL(ctx, client, repo.Owner, repo.Name, target.Number)
 			return status, ghapiops.Usage{}, err
 		}
@@ -219,13 +216,10 @@ func pollReviewStatus(ctx context.Context, selector string, interval, timeout in
 			return fmt.Errorf("build REST client: %w", err)
 		}
 		fetchers[pollingBackendREST] = func(ctx context.Context) (reviewStatus, ghapiops.Usage, error) {
-			if err := ctx.Err(); err != nil {
-				return reviewStatus{}, ghapiops.Usage{}, err
-			}
 			status, err := fetchReviewStatusREST(ctx, client, repo.Owner, repo.Name, target.Number)
 			return status, ghapiops.Usage{}, err
 		}
-		if polling.AutoAdjustWeights && (polling.Backend == pollingBackendAuto || polling.Backend == pollingBackendRandom) {
+		if polling.AutoAdjustWeights && polling.IsAdaptive() {
 			rateLimits = &ghapiops.CachedRateLimitFetcher{
 				Fetcher:    restRateLimitFetcher{client: client},
 				MinRefresh: time.Minute,
