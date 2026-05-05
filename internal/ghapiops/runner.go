@@ -66,5 +66,5 @@ func FetchWithFallback[T any](ctx context.Context, order []Backend, fetchers map
 		}
 		errs = append(errs, wrappedErr)
 	}
-	return Result[T]{Usage: totalUsage}, errors.New("no backend selected")
+	panic("unreachable: non-empty backend order must return from loop")
 }

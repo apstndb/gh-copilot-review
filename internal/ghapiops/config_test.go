@@ -303,3 +303,32 @@ func TestCachedRateLimitFetcherRejectsNilFetcher(t *testing.T) {
 		t.Fatalf("CachedRateLimitFetcher.Fetch() error = %v, want missing fetcher context", err)
 	}
 }
+
+func TestCachedRateLimitFetcherHonorsCanceledContextOnCacheHit(t *testing.T) {
+	t.Parallel()
+
+	source := &stubRateLimitFetcher{
+		snapshots: []RateLimitSnapshot{
+			{CoreRemaining: 10, GraphQLRemaining: 20},
+		},
+	}
+	cache := &CachedRateLimitFetcher{
+		Fetcher:    source,
+		MinRefresh: time.Minute,
+		Now:        func() time.Time { return time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC) },
+	}
+	if _, err := cache.Fetch(context.Background()); err != nil {
+		t.Fatalf("CachedRateLimitFetcher.Fetch() warm cache error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := cache.Fetch(ctx)
+	if err == nil {
+		t.Fatal("CachedRateLimitFetcher.Fetch() error = nil, want canceled context")
+	}
+	if err != context.Canceled {
+		t.Fatalf("CachedRateLimitFetcher.Fetch() error = %v, want context.Canceled", err)
+	}
+}

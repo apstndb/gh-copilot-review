@@ -31,6 +31,9 @@ type CachedRateLimitFetcher struct {
 }
 
 func (f *CachedRateLimitFetcher) Fetch(ctx context.Context) (RateLimitSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return RateLimitSnapshot{}, err
+	}
 	if f.Fetcher == nil {
 		return RateLimitSnapshot{}, errors.New("cached rate limit fetcher requires a fetcher")
 	}
