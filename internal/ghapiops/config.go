@@ -57,6 +57,10 @@ func ValidateConfig(config Config) error {
 }
 
 func SelectBackends(config Config, limits *RateLimitSnapshot, randomInt63n func(int64) int64) ([]Backend, error) {
+	if err := ValidateConfig(config); err != nil {
+		return nil, err
+	}
+
 	switch config.Backend {
 	case BackendGraphQL:
 		return []Backend{BackendGraphQL}, nil

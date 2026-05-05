@@ -221,6 +221,22 @@ func TestSelectBackendsRejectsNilRandomFunc(t *testing.T) {
 	}
 }
 
+func TestSelectBackendsRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	_, err := SelectBackends(Config{
+		Backend:       BackendAuto,
+		RESTWeight:    0,
+		GraphQLWeight: 0,
+	}, nil, func(int64) int64 { return 0 })
+	if err == nil {
+		t.Fatal("SelectBackends() error = nil, want invalid-config error")
+	}
+	if !containsAny(err.Error(), "adaptive polling requires") {
+		t.Fatalf("SelectBackends() error = %v, want ValidateConfig error", err)
+	}
+}
+
 func TestCachedRateLimitFetcher(t *testing.T) {
 	t.Parallel()
 
