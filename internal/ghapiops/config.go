@@ -117,6 +117,9 @@ func scaleWeight(weight int64, remaining int) int64 {
 }
 
 func chooseWeightedBackend(restWeight, graphqlWeight int64, randomInt63n func(int64) int64) (Backend, error) {
+	if restWeight < 0 || graphqlWeight < 0 {
+		return "", errors.New("adaptive polling weights must be non-negative")
+	}
 	restWeight, graphqlWeight = normalizeWeightedPair(restWeight, graphqlWeight)
 	total := restWeight + graphqlWeight
 	if total <= 0 {

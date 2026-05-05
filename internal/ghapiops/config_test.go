@@ -193,6 +193,18 @@ func TestChooseWeightedBackendHandlesLargeWeights(t *testing.T) {
 	}
 }
 
+func TestChooseWeightedBackendRejectsNegativeWeights(t *testing.T) {
+	t.Parallel()
+
+	_, err := chooseWeightedBackend(-1, 1, func(int64) int64 { return 0 })
+	if err == nil {
+		t.Fatal("chooseWeightedBackend() error = nil, want negative-weight error")
+	}
+	if !containsAny(err.Error(), "non-negative") {
+		t.Fatalf("chooseWeightedBackend() error = %v, want non-negative weight context", err)
+	}
+}
+
 func TestSelectBackendsRejectsNilRandomFunc(t *testing.T) {
 	t.Parallel()
 
